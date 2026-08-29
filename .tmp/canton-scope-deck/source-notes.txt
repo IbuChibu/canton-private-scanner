@@ -1,0 +1,19 @@
+All claims and figures come from the local Cantor8 project and its validation.
+
+Primary sources:
+- /Users/ebrahimakhoon/Documents/cantor-hackathon-toolkit/README.md
+- /Users/ebrahimakhoon/Documents/cantor-hackathon-toolkit/PROJECT_PLAN.md
+- /Users/ebrahimakhoon/Documents/cantor-hackathon-toolkit/DEMO_RUNBOOK.md
+- /Users/ebrahimakhoon/Documents/cantor-hackathon-toolkit/scanner.py
+- /Users/ebrahimakhoon/Documents/cantor-hackathon-toolkit/updates.py
+- /Users/ebrahimakhoon/Documents/cantor-hackathon-toolkit/database.py
+- /Users/ebrahimakhoon/Documents/cantor-hackathon-toolkit/api.py
+- /Users/ebrahimakhoon/Documents/cantor-hackathon-toolkit/frontend/app.js
+- /Users/ebrahimakhoon/Documents/cantor-hackathon-toolkit/tests/test_scanner.py
+- /Users/ebrahimakhoon/Documents/cantor-hackathon-toolkit/tests/test_frontend_status.mjs
+
+Live validation recorded 2026-08-29:
+- 3 active, rights-verified parties.
+- Stream resumed from offset 2,920,767 and reached 2,923,045: 2,278 offsets.
+- 41 Python tests and 8 JavaScript tests passed: 49 total.
+

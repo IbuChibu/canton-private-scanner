@@ -1,0 +1,14 @@
+Communication job: By the end, Cantor8 judges should understand that Canton
+Scope is a correct, privacy-aware, restart-safe private ledger index—not a
+global block explorer—and see concrete proof that it works on DevNet.
+
+Narrative:
+1. Name and promise.
+2. Canton privacy creates the need for a private index.
+3. Exact-offset ACS, party-scoped streaming, and atomic persistence form the core.
+4. The local dashboard turns indexed state into an operator experience.
+5. Close with validated demo evidence and the submission takeaway.
+
+Visual route: Codex Grid, using layouts 01, 05, 17, and 19.
+Palette: white canvas, black type, pale gray structure, blue evidence accents.
+
