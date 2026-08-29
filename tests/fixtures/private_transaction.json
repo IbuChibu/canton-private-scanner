@@ -1,0 +1,88 @@
+{
+  "offset": "101",
+  "updateId": "update-101",
+  "recordTime": "2026-08-29T12:00:00Z",
+  "events": [
+    {
+      "ExercisedEvent": {
+        "value": {
+          "eventId": "event-transfer",
+          "contractId": "factory-contract",
+          "templateId": "pkg:Splice.Api.Token.TransferInstructionV1:TransferFactory",
+          "choice": "TransferFactory_Transfer",
+          "consuming": false,
+          "choiceArgument": {
+            "expectedAdmin": "admin::1220admin",
+            "transfer": {
+              "sender": "00209eb9a1e8485ba9a7383aa6115ab2::1220alice",
+              "receiver": "0024bd501a4e4ea2b36125d43107085b::1220bob",
+              "amount": "0.3",
+              "instrumentId": {
+                "admin": "admin::1220admin",
+                "id": "Amulet"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "ExercisedEvent": {
+        "value": {
+          "eventId": "event-consume-old",
+          "contractId": "holding-old",
+          "templateId": "pkg:Splice.Amulet:Amulet",
+          "choice": "Archive",
+          "choiceArgument": {},
+          "consuming": true
+        }
+      }
+    },
+    {
+      "CreatedTreeEvent": {
+        "value": {
+          "eventId": "event-create-change",
+          "contractId": "holding-change",
+          "templateId": "pkg:Splice.Amulet:Amulet",
+          "interfaceViews": [
+            {
+              "interfaceId": "#splice-api-token-holding-v1:Splice.Api.Token.HoldingV1:Holding",
+              "viewValue": {
+                "owner": "00209eb9a1e8485ba9a7383aa6115ab2::1220alice",
+                "amount": "0.7",
+                "instrumentId": {
+                  "admin": "admin::1220admin",
+                  "id": "Amulet"
+                },
+                "lock": null
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "CreatedEvent": {
+        "value": {
+          "eventId": "event-create-receiver",
+          "contractId": "holding-receiver",
+          "templateId": "pkg:Splice.Amulet:Amulet",
+          "interfaceViews": [
+            {
+              "interfaceId": "#splice-api-token-holding-v1:Splice.Api.Token.HoldingV1:Holding",
+              "viewValue": {
+                "owner": "0024bd501a4e4ea2b36125d43107085b::1220bob",
+                "amount": "0.3",
+                "instrumentId": {
+                  "admin": "admin::1220admin",
+                  "id": "Amulet"
+                },
+                "lock": null
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

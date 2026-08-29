@@ -1,179 +1,188 @@
-# Canton hackathon toolkit
+# Canton private ledger scanner
 
-Get to your first Canton transaction without installing much.
+This is a small, resumable indexer for the Cantor8 A1 scanner challenge. It
+builds a local view of Canton Coin Holdings and semantic transfers for three
+fixed parties by reading the **private Canton Ledger API**. The public Scan API
+is not used as the source of scanner history.
 
-`c8lab.py` is Python 3, **stdlib only**, no `pip install`. That is deliberate:
-some laptops are locked down and you do not want to debug pip on the day.
+## Why a private scanner?
 
-It runs against two targets:
+Canton data is disclosed on a need-to-know basis. A participant sees ledger
+events for parties it hosts or has rights to, rather than a network-wide public
+transaction log. An application that needs fast balances, history, or reports
+therefore maintains an off-ledger index of its own authorized view.
 
-- **LocalNet**, a whole Canton network in Docker on your laptop. The default.
-- **DevNet**, the shared Cantor8 node. Set four environment variables.
+This scanner makes that boundary explicit: `/v2/updates` is filtered separately
+for each tracked party. A wildcard means every template visible **to that
+party**; it does not mean every party or event on the participant.
 
-| File | What |
-|---|---|
-| `CHALLENGES.md` | The problems, and what to build |
-| `SETUP.md` | Install LocalNet, and the Daml toolchain if you need it |
-| `API.md` | Tested cheat sheet of the APIs you will use, and what needs a token |
-| `TROUBLESHOOTING.md` | Every error we actually hit, and the fix |
-| `c8lab.py` | The lab |
-| `daml-starter/` | Working Daml to copy from, including the mandate task |
+## Architecture
 
-Start with `SETUP.md`, come back here.
+```mermaid
+flowchart LR
+    L["Private Canton Ledger API"]
+    A["scanner.py<br/>ACS at fixed ledger end"]
+    U["updates.py<br/>party-scoped live stream"]
+    P["Conservative event parser"]
+    D[("SQLite<br/>holdings + events + transfers + offset")]
+    F["FastAPI"]
 
-**Looking for the problems?** They are in [`CHALLENGES.md`](CHALLENGES.md).
-
-## The lab
-
-Six steps. This is the shape of every Canton app.
-
+    L -->|"active contracts at offset N"| A
+    A -->|"atomic snapshot + N"| D
+    L -->|"beginExclusive N"| U
+    U --> P
+    P -->|"one SQLite transaction per ledger transaction"| D
+    D --> F
 ```
-1. Get a token                    the API is authenticated
-2. Allocate a party               your identity on the ledger
-3. Set up a TransferPreapproval   so people can pay you directly
-4. Read your balance from the ACS zero, at first
-5. Get some Canton Coin           LocalNet mints it, on DevNet ask the team
-6. Send a token standard transfer to another party
-```
 
-### Run it
+The startup order is intentional:
+
+1. `scanner.py` reads the ledger end once.
+2. It reads every tracked party's Active Contract Set at that exact offset.
+3. It commits all current Holdings and the same offset atomically.
+4. `updates.py` streams from `beginExclusive` at the saved offset.
+
+Starting the stream with a zero balance would be incorrect. Re-running
+`scanner.py` against an initialized database is a safe no-op; normal restarts
+go directly to `updates.py`.
+
+## Persistence and correctness
+
+`scanner.db` contains:
+
+- `holdings`: current active Holding contracts.
+- `scanner_state`: the latest processed private ledger offset.
+- `holding_history`: low-level create/archive accounting effects.
+- `private_events`: durable raw private events useful after participant pruning.
+- `transfers`: only confidently reconstructed semantic transfers.
+
+For each live ledger transaction, Holding changes, raw events, semantic
+transfers, and the offset commit together. A failure rolls all of them back.
+Offsets only move forward, so reconnect replay cannot resurrect an older
+Holding state.
+
+The live request combines two filters per tracked party:
+
+- the token `Holding` interface with its interface view, used to maintain
+  balances;
+- a party-scoped wildcard, used to see other authorized private exercises.
+
+A consumed contract is handled whether Canton represents it as an
+`ArchivedEvent` or as a consuming `ExercisedEvent` under
+`TRANSACTION_SHAPE_LEDGER_EFFECTS`.
+
+## Transfer reconstruction
+
+The scanner does **not** infer a transfer from “Holding archived + Holding
+created.” Those effects can also be minting, burning, locking, fees, or another
+token operation.
+
+A row enters `transfers` only when a private `TransferFactory_Transfer` exercise
+contains an explicit, valid sender, receiver, positive amount, and optional
+instrument. Every visible event is still preserved in `private_events`, so the
+parser can be extended later without depending on already-pruned participant
+history.
+
+## Setup
+
+Python 3.10+ is sufficient. The Ledger HTTP client in `c8lab.py` uses the
+standard library; the live scanner and API need three small packages.
 
 ```bash
-python3 c8lab.py                          # check everything, list parties, balances
-python3 c8lab.py party myteam             # step 2
-python3 c8lab.py preapproval <party>      # step 3
-python3 c8lab.py holdings <party>         # steps 4 and 5
-python3 c8lab.py transfer <from> <to> 25  # step 6
-python3 c8lab.py accept <instructionCid> <to>   # if step 6 returned an offer
-python3 c8lab.py grant <user> <party>           # fix a 403
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 ```
 
-`check` first, always. It verifies auth, the ledger, your parties and their
-balances. It does **not** check that the registry is reachable, that you have
-act-as rights on every party, or that a preapproval has been accepted. So a
-clean `check` means the basics are fine, not that everything is.
-
-### What good output looks like
-
-```
-base       http://localhost:2975
-mode       LocalNet / unsafe HS256
-token      ok
-ledger end 104
-local parties (3):
-    app_user_cantor8-hackathon-1::1220...
-    participant::1220...
-
-holdings for app_user_cantor8-hackathon-1: 1 contract(s), total 4220.16
-    {'amount': '4220.16', 'instrument': 'Amulet', 'locked': False}
-```
-
-`Amulet` is Canton Coin. Amulet is the name in the Daml code, Canton Coin is the
-name in the marketing. Same thing.
-
-On LocalNet the balance grows on its own as mining rounds tick over and pay the
-validator. Nothing is broken.
-
-## Three things worth understanding
-
-### Your balance is not a number
-
-It is a set of contracts. `total 4220.16` is the sum of the `Holding` contracts
-you can see. A transfer archives the ones it spends and creates new ones, like
-handing over a note and getting change.
-
-This is why two transfers at the same time can fight over the same holding.
-One wins, the other fails, and both pay for the traffic.
-
-### A token is a Daml package plus a web service
-
-Step 6 is two phases, and the first surprises everyone:
-
-```
-1. Ask the registry for a transfer factory and a choice context.
-2. Exercise TransferFactory_Transfer, attaching what it gave you.
-```
-
-Why the registry exists: privacy. You cannot see the issuer's configuration
-contracts, so it hands them to you as **disclosed contracts**, valid for that one
-transaction. On LocalNet the registry is the scan app; ours returned five
-disclosed contracts and a context with `amulet-rules`, `open-round`,
-`transfer-preapproval` and `external-party-config-state`.
-
-If you skip this and try to build the transfer by hand, it will not work, and
-the error will not tell you why.
-
-### `transferKind` tells you which flow you are in
-
-The registry answers with one of:
-
-- **`direct`**: the receiver has a live `TransferPreapproval`. Money moves
-  immediately.
-- **`offer`**: no preapproval. A `TransferInstruction` is created and the
-  receiver has to accept it. Their balance does **not** change until they do.
-- **`self`**: sender and receiver are the same party.
-
-We saw both. A party with an accepted preapproval got `direct` and received the
-money straight away. A party with no preapproval got `offer`, the transfer
-succeeded, and the balance stayed empty until we accepted it.
-
-`transfer` prints the `instructionCid` and the exact accept command when it
-returns an offer. Run it and the money moves.
-
-**So if you send money and the receiver sees nothing, check `transferKind`
-before you debug anything else.** Preapproval acceptance is not instant: you
-create the proposal, and the validator's automation accepts it a moment later.
-
-## The functions
-
-Import it, do not just use the CLI.
-
-| Function | Does |
-|---|---|
-| `token(sub)` | HS256 on LocalNet, Keycloak on DevNet |
-| `call(path, body, sub)` | Any Ledger API call. Prints the real error on failure. |
-| `ledger_end()` | Current offset |
-| `parties()` / `local_parties()` | What the node knows, and what it hosts |
-| `allocate_party(hint)` | Allocate, or reuse if it exists |
-| `grant_act_as(user, party)` | Fix a 403 |
-| `holdings(party)` | Balances, via the interface filter |
-| `submit(cmds, act_as, disclosed)` | Any command, with disclosed contracts |
-| `create_preapproval(me, provider)` | Step 3 |
-| `registry(path, body)` | Call the token registry |
-| `transfer(from, to, amount)` | Step 6, both phases |
-| `check()` | Run this first when something is broken |
-
-Only reuse parties where `isLocal` is true. A node lists parties it has heard
-about from the network, including ones hosted elsewhere that it cannot submit
-for. Using one of those gives you
-`NO_SYNCHRONIZER_ON_WHICH_ALL_SUBMITTERS_CAN_SUBMIT`.
-
-## Running against DevNet
+DevNet credentials are expected in the existing ignored `.env`. Load them into
+the shell without printing them:
 
 ```bash
-export C8_BASE=https://api.validator.dev.digik.cantor8.tech/api/ledger
-export C8_IDP=https://auth.dev.digik.cantor8.tech
-export C8_CLIENT_ID=hackathon
-export C8_CLIENT_SECRET=<ask the Cantor8 team>
-export C8_REGISTRY=<registry base url>       # needed for transfers
-python3 c8lab.py check
+set -a
+source .env
+set +a
 ```
 
-Setting `C8_IDP` switches from a self-signed LocalNet token to a real Keycloak
-client-credentials token. Everything else is the same.
+Never commit `.env`, `scanner.db`, tokens, or `C8_CLIENT_SECRET`. Do not use
+`c8lab.py check` on DevNet; it walks too many parties. The scanner uses only the
+three fixed prefixes in `scanner.py` and `updates.py`.
 
-For DevNet you will also need `C8_REGISTRY` pointing at the Cantor8 registry, and
-Canton Coin has to be sent to you: give the team your party ID.
+## Run the demo
 
-**Not yet verified on DevNet.** Party allocation there may need the
-external-party topology flow rather than `POST /v2/parties`. If it fails at step
-2, that is why.
+Terminal 1, first run only:
 
-## Docs
-
+```bash
+source .venv/bin/activate
+set -a; source .env; set +a
+python scanner.py
+python updates.py
 ```
-Canton docs, has a chatbot   https://docs.canton.network
-Ledger API                   https://docs.canton.network/sdks-tools/api-reference/ledger-api
-Validator Admin API          https://docs.canton.network/sdks-tools/api-reference/admin-api
-Token standard               https://docs.canton.network/appdev/deep-dives/token-standard
+
+After the ACS has been bootstrapped, restart directly from the saved offset:
+
+```bash
+source .venv/bin/activate
+set -a; source .env; set +a
+python updates.py
 ```
+
+Terminal 2:
+
+```bash
+source .venv/bin/activate
+uvicorn api:app --reload
+```
+
+Then query a full party ID or an unambiguous prefix:
+
+```bash
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/balance/00209eb9a1e8485ba9a7383aa6115ab2
+curl http://127.0.0.1:8000/history/00209eb9a1e8485ba9a7383aa6115ab2
+```
+
+Endpoints:
+
+- `GET /health` — readiness and latest indexed offset.
+- `GET /balance/{party}` — current Decimal-aggregated balances.
+- `GET /history/{party}` — semantic transfers with `sent`, `received`, or
+  `self` direction and counterparty.
+- `GET /debug/holding-history/{party}` — low-level Holding effects.
+- `GET /docs` — generated interactive API documentation.
+
+## Tests
+
+The tests use temporary SQLite databases and synthetic private Ledger API JSON;
+they never need DevNet credentials or modify the real `scanner.db`.
+
+```bash
+python -m unittest discover -s tests -v
+python -m py_compile database.py scanner.py updates.py api.py c8lab.py
+```
+
+Coverage includes Holding create/archive, consuming exercises, semantic and
+non-semantic exercises, raw-event persistence, atomic rollback, replay
+idempotency, monotonic checkpoints, prefix resolution, exact Decimal balances,
+tree/list transaction envelopes, and restart request construction.
+
+## Known limitations
+
+- The participant reported private history pruned before approximately offset
+  `2909305`. Transfers before the scanner's starting point cannot be recovered
+  from this participant.
+- The current local database was bootstrapped around offset `2920767`; no
+  qualifying post-bootstrap `TransferFactory_Transfer` has yet been observed,
+  so semantic history is verified with fixtures but not a successful transfer
+  between the three DevNet parties.
+- A prior transfer attempt between tracked parties failed with
+  `NO_SYNCHRONIZER_ON_WHICH_ALL_SUBMITTERS_CAN_SUBMIT`. Read visibility does not
+  imply those parties can submit together.
+- The parser intentionally recognizes only the confirmed transfer-factory
+  choice. Other token-standard flows should be added only after their private
+  event arguments are captured and understood.
+- DevNet can be slow during the hackathon. A connection timeout is not, by
+  itself, evidence of a parser or persistence failure.
+
+The highest-value next step is to capture one real qualifying private transfer
+event for a submit-capable party pair, add it as a redacted fixture, and compare
+the resulting API history with the transaction submission response.
