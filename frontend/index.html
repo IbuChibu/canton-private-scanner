@@ -39,7 +39,7 @@
             aria-haspopup="dialog"
           >
             <span class="admin-button__lock" aria-hidden="true"></span>
-            Admin locked
+            <span id="admin-label">Admin locked</span>
           </button>
         </div>
       </header>
@@ -76,33 +76,59 @@
 
         <div class="notice notice--error" id="error-banner" role="alert" hidden>
           <div>
-            <strong>Scanner data is temporarily unavailable</strong>
+            <strong id="error-title">Scanner data is temporarily unavailable</strong>
             <p id="error-message">The last indexed state remains visible.</p>
           </div>
           <button type="button" id="retry-button">Retry</button>
         </div>
 
-        <section class="status-rail" aria-label="Scanner status" aria-busy="true">
-          <article class="status-primary">
+        <section
+          class="status-rail"
+          id="scanner-status"
+          aria-label="Scanner status"
+          aria-busy="true"
+        >
+          <article class="status-primary" id="status-primary" data-status="starting">
             <span class="status-orbit" aria-hidden="true"></span>
             <div>
               <p>Scanner stream</p>
-              <strong>Connecting</strong>
+              <strong id="stream-status" aria-live="polite">Connecting</strong>
+              <time class="status-last-updated" id="status-last-updated">
+                Waiting for first response
+              </time>
             </div>
-            <span class="status-chip">Starting</span>
+            <span class="status-chip" id="stream-chip">Starting</span>
           </article>
 
           <article class="status-metric">
             <p>Ledger offset</p>
-            <span class="skeleton skeleton--metric">Loading offset</span>
+            <strong
+              class="skeleton skeleton--metric status-metric__value"
+              id="ledger-offset"
+            >Loading offset</strong>
+            <span class="status-metric__detail" id="offset-detail">
+              Waiting for scanner state
+            </span>
           </article>
           <article class="status-metric">
             <p>Active parties</p>
-            <span class="skeleton skeleton--short">Loading count</span>
+            <strong
+              class="skeleton skeleton--short status-metric__value"
+              id="active-party-count"
+            >Loading count</strong>
+            <span class="status-metric__detail" id="party-count-detail">
+              Desired selection pending
+            </span>
           </article>
           <article class="status-metric">
             <p>Catalog</p>
-            <span class="skeleton skeleton--medium">Loading catalog</span>
+            <strong
+              class="skeleton skeleton--medium status-metric__value"
+              id="catalog-summary"
+            >Loading catalog</strong>
+            <span class="status-metric__detail" id="catalog-detail">
+              Waiting for catalog state
+            </span>
           </article>
         </section>
 
@@ -113,7 +139,11 @@
                 <p class="panel-kicker">Authorized catalog</p>
                 <h2 id="party-heading">Parties</h2>
               </div>
-              <span class="count-badge" aria-label="Party count loading">—</span>
+              <span
+                class="count-badge"
+                id="party-total-count"
+                aria-label="Party count loading"
+              >—</span>
             </div>
 
             <label class="search-field" for="party-search">
@@ -129,7 +159,12 @@
               <kbd>⌘ K</kbd>
             </label>
 
-            <div class="party-list" aria-busy="true" aria-live="polite">
+            <div
+              class="party-list"
+              id="party-list"
+              aria-busy="true"
+              aria-live="polite"
+            >
               <div class="party-placeholder">
                 <span class="party-placeholder__avatar"></span>
                 <span class="party-placeholder__lines">
@@ -148,13 +183,29 @@
                   <i></i><i></i>
                 </span>
               </div>
-              <p class="loading-label">Loading authorized parties…</p>
+              <p class="loading-label" id="party-loading-label">
+                Loading authorized parties…
+              </p>
             </div>
 
+            <div class="selection-bar" id="selection-bar">
+              <div>
+                <strong id="selection-count">— selected</strong>
+                <span id="selection-limit">Admin locked</span>
+              </div>
+              <div class="selection-actions">
+                <button type="button" id="reset-selection" disabled>Reset</button>
+                <button class="selection-save" type="button" id="save-selection" disabled>
+                  Apply
+                </button>
+              </div>
+            </div>
+            <p class="selection-message" id="selection-message" aria-live="polite"></p>
+
             <div class="party-pagination" aria-label="Party pagination">
-              <button type="button" disabled>Previous</button>
-              <span>Page —</span>
-              <button type="button" disabled>Next</button>
+              <button type="button" id="party-previous" disabled>Previous</button>
+              <span id="party-page-status">Page —</span>
+              <button type="button" id="party-next" disabled>Next</button>
             </div>
           </aside>
 
@@ -167,7 +218,7 @@
                 </div>
                 <div class="focused-party" aria-label="Focused party loading">
                   <span>Focused party</span>
-                  <strong>Waiting for catalog</strong>
+                  <strong id="focused-party">Waiting for catalog</strong>
                 </div>
               </div>
 
@@ -257,8 +308,13 @@
     </div>
 
     <dialog class="admin-dialog" id="admin-dialog" aria-labelledby="admin-title">
-      <form method="dialog">
-        <button class="dialog-close" value="cancel" aria-label="Close admin dialog">×</button>
+      <form id="admin-form">
+        <button
+          class="dialog-close"
+          id="close-admin"
+          type="button"
+          aria-label="Close admin dialog"
+        >×</button>
         <p class="panel-kicker">Protected action</p>
         <h2 id="admin-title">Unlock party selection</h2>
         <p>
@@ -270,13 +326,15 @@
           id="admin-token"
           type="password"
           autocomplete="off"
-          placeholder="Available in Milestone 3"
-          disabled
+          placeholder="Enter scanner admin token"
+          required
         >
-        <button class="dialog-submit" type="submit" value="cancel" disabled>
+        <button class="dialog-submit" id="unlock-admin" type="submit">
           Unlock selection
         </button>
-        <small>Party management is not enabled in this frontend milestone.</small>
+        <small id="admin-feedback" aria-live="polite">
+          The token remains in memory only until this tab closes.
+        </small>
       </form>
     </dialog>
 

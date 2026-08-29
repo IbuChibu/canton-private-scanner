@@ -101,6 +101,8 @@ routes still resolve; layout works at 375 px, tablet, and desktop widths.
 
 ### Milestone 2 — Browser data layer and scanner status
 
+**Status: complete.**
+
 - Implement one fetch wrapper with JSON parsing, timeouts, abort support, and
   consistent handling for 400, 403, 404, 409, 422, 500, and network failures.
 - Render bootstrap-required, catalog-refreshing, connected, retrying,
@@ -114,6 +116,8 @@ routes still resolve; layout works at 375 px, tablet, and desktop widths.
 failures leave existing data visible and provide a retry action.
 
 ### Milestone 3 — Party explorer and controlled selection
+
+**Status: complete.**
 
 - Add 250 ms debounced server-side search and 50-row previous/next pagination
   using the cached `/parties` API.

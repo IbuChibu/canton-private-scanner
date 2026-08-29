@@ -152,9 +152,11 @@ the API, inspect the cache, and save full party IDs:
 
 ```bash
 python scanner.py --catalog-only
+export SCANNER_ADMIN_TOKEN='choose-a-long-random-demo-token'
 uvicorn api:app --reload
 curl 'http://127.0.0.1:8000/parties?q=00209&limit=50&offset=0'
 curl -X PUT http://127.0.0.1:8000/parties/selection \
+  -H "Authorization: Bearer $SCANNER_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"parties":["full::party-id"]}'
 python scanner.py
@@ -168,7 +170,9 @@ python scanner.py --refresh-parties --catalog-only
 ```
 
 The default selection limit is 50; set `SCANNER_MAX_PARTIES` before starting
-the API to change it.
+the API to change it. Party browsing is public, but selection mutation is
+disabled unless `SCANNER_ADMIN_TOKEN` is configured. The browser keeps an
+entered admin token in memory for the current tab only.
 
 After the ACS has been bootstrapped, restart directly from the saved offset:
 
@@ -186,8 +190,10 @@ uvicorn api:app --reload
 ```
 
 Open `http://127.0.0.1:8000/` for the responsive scanner dashboard shell.
-Milestone 1 provides the visual interface and same-origin hosting; live browser
-data wiring follows in the next frontend milestone.
+The status rail polls the local health API, pauses in background tabs, keeps the
+last good state during transient failures, and supports the richer hosted-worker
+heartbeat planned for deployment. Party browsing, balances, and transfer-table
+data are connected in later frontend milestones.
 
 Then query a full party ID or an unambiguous prefix:
 
@@ -202,7 +208,9 @@ Endpoints:
 - `GET /health` — readiness and latest indexed offset.
 - `GET /parties?q=&limit=50&offset=0` — cached searchable authorized parties,
   selection state, and catalog metadata; it performs no live Canton calls.
-- `PUT /parties/selection` — persist a validated desired set of full party IDs.
+- `GET /parties/selection` — complete desired/active sets and selection limits.
+- `PUT /parties/selection` — persist a validated desired set of full party IDs;
+  requires the configured scanner admin bearer token.
 - `GET /balance/{party}` — current Decimal-aggregated balances.
 - `GET /history/{party}` — semantic transfers with `sent`, `received`, or
   `self` direction and counterparty, including current indexing status.
@@ -216,6 +224,7 @@ they never need DevNet credentials or modify the real `scanner.db`.
 
 ```bash
 python -m unittest discover -s tests -v
+node --test tests/test_frontend_status.mjs
 python -m py_compile database.py scanner.py updates.py api.py c8lab.py
 ```
 

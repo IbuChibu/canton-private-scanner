@@ -1,9 +1,10 @@
 """FastAPI API for the local private ledger index and party selector."""
 
 import os
+import secrets
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -20,6 +21,7 @@ app = FastAPI(
 database.create_tables()
 
 MAX_SELECTED_PARTIES = int(os.environ.get("SCANNER_MAX_PARTIES", "50"))
+ADMIN_TOKEN = os.environ.get("SCANNER_ADMIN_TOKEN")
 FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
 
 app.mount(
@@ -94,10 +96,48 @@ def parties(
     return response
 
 
+@app.get("/parties/selection")
+def party_selection():
+    """Return the complete selection state needed by the browser editor."""
+
+    return {
+        **database.get_selection_status(),
+        "max_parties": MAX_SELECTED_PARTIES,
+        "selection_management_enabled": bool(ADMIN_TOKEN),
+    }
+
+
+def require_selection_admin(authorization):
+    """Validate the hosted selection token without exposing its value."""
+
+    if not ADMIN_TOKEN:
+        raise HTTPException(
+            status_code=503,
+            detail="Party selection management is disabled.",
+        )
+    if not isinstance(authorization, str):
+        authorization = ""
+    scheme, separator, credential = (authorization or "").partition(" ")
+    if (
+        not separator
+        or scheme.lower() != "bearer"
+        or not credential
+        or not secrets.compare_digest(credential, ADMIN_TOKEN)
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="A valid scanner admin token is required.",
+        )
+
+
 @app.put("/parties/selection")
-def update_party_selection(request: PartySelectionRequest):
+def update_party_selection(
+    request: PartySelectionRequest,
+    authorization: str | None = Header(default=None),
+):
     """Persist a desired selection; scanner.py activates it later."""
 
+    require_selection_admin(authorization)
     try:
         return database.set_desired_parties(
             request.parties,

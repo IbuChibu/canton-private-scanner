@@ -598,6 +598,9 @@ class ApiTests(TemporaryScannerDatabase):
         self.assertIn("@media (max-width: 600px)", styles)
         self.assertIn("prefers-reduced-motion", styles)
         self.assertIn("showModal", javascript)
+        self.assertIn('requestJson("/health"', javascript)
+        self.assertIn('addEventListener("visibilitychange"', javascript)
+        self.assertIn("RequestTimeoutError", javascript)
 
         route_paths = {route.path for route in api.app.routes}
         self.assertTrue(
@@ -672,9 +675,17 @@ class ApiTests(TemporaryScannerDatabase):
         self.assertFalse(response["restart_required"])
         self.assertEqual(response["catalog"]["user_id"], "api-user")
 
-        selection = api.update_party_selection(
-            api.PartySelectionRequest(parties=[BOB])
-        )
+        with mock.patch.object(api, "ADMIN_TOKEN", "test-admin-token"):
+            public_selection = api.party_selection()
+            self.assertEqual(public_selection["desired_parties"], [ALICE])
+            self.assertEqual(public_selection["active_parties"], [ALICE])
+            self.assertTrue(public_selection["selection_management_enabled"])
+            self.assertEqual(public_selection["max_parties"], 50)
+
+            selection = api.update_party_selection(
+                api.PartySelectionRequest(parties=[BOB]),
+                authorization="Bearer test-admin-token",
+            )
         self.assertEqual(selection["desired_parties"], [BOB])
         self.assertEqual(selection["active_parties"], [ALICE])
         self.assertTrue(selection["restart_required"])
@@ -682,6 +693,33 @@ class ApiTests(TemporaryScannerDatabase):
         with self.assertRaises(Exception) as raised:
             api.balance(BOB)
         self.assertEqual(raised.exception.status_code, 409)
+
+    def test_selection_mutation_is_disabled_or_rejects_invalid_admin_tokens(self):
+        database.replace_party_catalog([catalog_entry(ALICE)], "api-user", False)
+        api = importlib.import_module("api")
+        request = api.PartySelectionRequest(parties=[ALICE])
+
+        with mock.patch.object(api, "ADMIN_TOKEN", None):
+            self.assertFalse(api.party_selection()["selection_management_enabled"])
+            with self.assertRaises(Exception) as disabled:
+                api.update_party_selection(request, authorization=None)
+            self.assertEqual(disabled.exception.status_code, 503)
+
+        with mock.patch.object(api, "ADMIN_TOKEN", "correct-token"):
+            for authorization in (None, "Basic correct-token", "Bearer wrong-token"):
+                with self.subTest(authorization=authorization):
+                    with self.assertRaises(Exception) as forbidden:
+                        api.update_party_selection(
+                            request,
+                            authorization=authorization,
+                        )
+                    self.assertEqual(forbidden.exception.status_code, 403)
+
+            response = api.update_party_selection(
+                request,
+                authorization="Bearer correct-token",
+            )
+            self.assertEqual(response["desired_parties"], [ALICE])
 
 
 if __name__ == "__main__":
