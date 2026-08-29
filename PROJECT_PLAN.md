@@ -173,6 +173,8 @@ service also stops the worker; replay remains idempotent.
 
 ### Milestone 6 — Local demo launch and operator setup
 
+**Status: complete.**
+
 - Add one documented startup flow for the FastAPI dashboard and managed worker.
 - Provide a safe local environment template covering `SCANNER_DB`,
   `SCANNER_RUN_WORKER`, `C8_BASE`, `C8_WS_URL`, `C8_IDP`, `C8_CLIENT_ID`,
@@ -187,6 +189,8 @@ service also stops the worker; replay remains idempotent.
 persisted offset.
 
 ### Milestone 7 — Submission validation and polish
+
+**Status: complete.**
 
 - Add backend tests for selection authentication, runtime health, history
   pagination, worker restart/reconciliation, and static routing.

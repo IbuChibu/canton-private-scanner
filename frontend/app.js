@@ -240,7 +240,12 @@
         chip: "Pending",
       };
     }
-    if (catalog.error) {
+    const hasVerifiedFallback = Boolean(
+      catalog.error
+      && (catalog.readable_count ?? 0) > 0
+      && stream?.status === "connected",
+    );
+    if (catalog.error && !hasVerifiedFallback) {
       return {
         tone: "error",
         label: "Catalog refresh failed",
@@ -312,7 +317,9 @@
       elements.catalogSummary,
       readableCount ? `${formatInteger(readableCount)} readable` : "Not populated",
     );
-    if (catalog.error) {
+    if (catalog.error && readableCount) {
+      elements.catalogDetail.textContent = "Verified selection · full refresh pending";
+    } else if (catalog.error) {
       elements.catalogDetail.textContent = "Last refresh failed";
     } else if (catalog.refreshed_at) {
       elements.catalogDetail.textContent = `Refreshed ${formatRelativeTime(catalog.refreshed_at)}`;

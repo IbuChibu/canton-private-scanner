@@ -25,7 +25,18 @@ def run_worker(stop_event=None, initial_backoff=2, maximum_backoff=30):
             try:
                 if database.party_catalog_is_empty():
                     database.update_scanner_runtime("discovering")
-                    scanner.refresh_party_catalog()
+                    catalog_state = database.get_party_catalog_state()
+                    previous_error = catalog_state.get("error")
+                    if previous_error and scanner.seed_tracked_catalog_from_rights(
+                        previous_error
+                    ):
+                        pass
+                    else:
+                        try:
+                            scanner.refresh_party_catalog()
+                        except Exception as catalog_error:
+                            if not scanner.seed_tracked_catalog_from_rights(catalog_error):
+                                raise
 
                 if not database.get_desired_parties():
                     database.seed_default_selection(scanner.DEFAULT_PARTIES)

@@ -49,6 +49,16 @@ lists that user's rights, and caches the readable party catalog. `CanActAs` and
 directory discovery, restricted to `isLocal` parties. Discovery never probes
 Holdings.
 
+DevNet's shared party directory can be slow or temporarily return 503. An
+existing scanner database does not have to wait for that large refresh: the
+managed worker re-reads the authenticated user's rights and, when those rights
+still cover every persisted desired/active party, exposes that verified
+selection and resumes the live stream. The dashboard reports
+`Verified selection · full refresh pending`; the full searchable directory can
+be refreshed later. This fallback never invents parties, probes Holdings, or
+changes the saved offset. A fresh database still requires a successful catalog
+load before its first bootstrap.
+
 The bootstrap order is intentional:
 
 1. The desired selection is loaded from SQLite.
@@ -143,20 +153,35 @@ bearer token's `sub`; LocalNet keeps the toolkit's `ledger-api-user` default.
 
 ## Run the demo
 
-For the normal local demo, use the checked one-command launcher. It loads the
+For the normal local demo, use this single startup flow. The launcher loads the
 ignored `.env`, verifies credentials and SQLite without resetting state, then
-runs one FastAPI process with its managed scanner worker:
+runs one FastAPI process with one managed scanner worker:
 
 ```bash
 source .venv/bin/activate
+python demo.py --check-only
 python demo.py
 ```
 
-Open `http://127.0.0.1:8000/`. Do not add `--workers`, and do not run
-`scanner.py` or `updates.py` in another terminal while the managed worker is
-enabled. Run `python demo.py --check-only` for preflight without starting the
-service. See [DEMO_RUNBOOK.md](DEMO_RUNBOOK.md) for the presentation sequence,
-restart proof, and non-destructive recovery commands.
+Open <http://127.0.0.1:8000/>. A healthy live demo shows `Live stream
+connected`, a changing ledger offset, and the active/desired party counts. A
+large-directory outage may also show `Verified selection · full refresh
+pending`; this is a safe cached-selection mode and does not stop live indexing.
+
+To use another local port:
+
+```bash
+python demo.py --port 8772
+```
+
+Then open <http://127.0.0.1:8772/>. Stop the complete API/worker pair with
+Ctrl-C. Starting the same command again reuses `scanner.db` and resumes from its
+persisted offset rather than rereading the full ACS.
+
+Do not add `--workers`, and do not run `scanner.py` or `updates.py` in another
+terminal while the managed worker is enabled. See
+[DEMO_RUNBOOK.md](DEMO_RUNBOOK.md) for the presentation sequence, restart proof,
+status checks, and non-destructive recovery commands.
 
 On a fresh database, the worker selects the original three demo parties only
 when all three are readable. If they are not, the catalog still becomes
@@ -173,13 +198,17 @@ export C8_WS_URL='wss://your-ledger-host/api/ledger/v2/updates'
 To refresh the slow party catalog explicitly, stop the API first and run:
 
 ```bash
+set -a
+source .env
+set +a
 python scanner.py --refresh-parties --catalog-only
 ```
 
 The default selection limit is 50; set `SCANNER_MAX_PARTIES` before starting
 the API to change it. Party browsing is public, but selection mutation is
 disabled unless `SCANNER_ADMIN_TOKEN` is configured. The browser keeps an
-entered admin token in memory for the current tab only.
+entered admin token in memory for the current tab only. After changing `.env`,
+restart `demo.py` so the API and worker receive the new values.
 
 The original two-terminal workflow remains available for debugging when
 `SCANNER_RUN_WORKER` is unset:
@@ -263,7 +292,9 @@ shutdown, crash consistency, and restart request construction.
   choice. Other token-standard flows should be added only after their private
   event arguments are captured and understood.
 - DevNet can be slow during the hackathon. A connection timeout is not, by
-  itself, evidence of a parser or persistence failure.
+  itself, evidence of a parser or persistence failure. On an existing database,
+  a rights-verified persisted selection can continue streaming while the full
+  directory refresh remains pending.
 
 The highest-value next step is to capture one real qualifying private transfer
 event for a submit-capable party pair, add it as a redacted fixture, and compare

@@ -129,6 +129,54 @@ def refresh_party_catalog():
     return discovery
 
 
+def seed_tracked_catalog_from_rights(refresh_error):
+    """Keep an existing index usable when the large directory is unavailable.
+
+    This is intentionally limited to parties already present in the persisted
+    desired/active selection. Rights are re-read first; no Holdings calls or
+    arbitrary party IDs are used. The catalog remains marked incomplete so an
+    operator can retry the full refresh later.
+    """
+
+    parties = sorted(
+        set(database.get_desired_parties()) | set(database.get_active_parties())
+    )
+    if not parties or database.get_saved_offset() is None:
+        return False
+
+    user_id = c8lab.authenticated_user_id()
+    explicit, read_as_any = parse_user_rights(c8lab.user_rights(user_id))
+    if not read_as_any and any(party not in explicit for party in parties):
+        return False
+
+    entries = []
+    for party in parties:
+        flags = explicit.get(party, {})
+        entries.append(
+            {
+                "party": party,
+                "display_name": party.split("::", 1)[0],
+                "is_local": True if party in DEFAULT_PARTIES else None,
+                "can_act_as": bool(flags.get("can_act_as")),
+                "can_read_as": bool(flags.get("can_read_as")),
+                "readable": True,
+                "source": "persisted_selection+verified_rights",
+            }
+        )
+
+    database.replace_party_catalog(entries, user_id, read_as_any)
+    database.record_party_catalog_error(
+        "Full party directory refresh pending; using the rights-verified "
+        f"persisted selection. Last refresh error: {refresh_error}"
+    )
+    print(
+        "party directory unavailable; continuing with",
+        len(entries),
+        "rights-verified persisted parties",
+    )
+    return True
+
+
 def holdings_at_offset(party, offset):
     """Read one party's Holding interface ACS at an exact ledger offset."""
 
