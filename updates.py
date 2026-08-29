@@ -14,64 +14,118 @@ PARTY_PREFIXES = [
 ]
 
 
-def get_event(event_wrapper):
+WS_URL = (
+    "wss://api.validator.dev.digik.cantor8.tech"
+    "/api/ledger/v2/updates"
+)
+
+
+# =========================================================
+# EVENT UNWRAPPING
+# =========================================================
+
+def unwrap_event(event_wrapper):
     """
-    Canton wraps events as CreatedEvent / ArchivedEvent.
+    Canton JSON events are wrapped by their event type.
 
-    Handle both:
+    Example:
 
-        {"CreatedEvent": {...}}
-
-    and:
-
-        {"CreatedEvent": {"value": {...}}}
+        {
+            "CreatedEvent": {
+                "value": {...}
+            }
+        }
     """
 
-    if "CreatedEvent" in event_wrapper:
+    event_types = [
+        "CreatedEvent",
+        "CreatedTreeEvent",
+        "ArchivedEvent",
+        "ExercisedEvent"
+    ]
 
-        event = event_wrapper["CreatedEvent"]
+    for event_type in event_types:
 
-        if isinstance(event, dict):
-            event = event.get("value", event)
+        wrapper = event_wrapper.get(
+            event_type
+        )
 
-        return "created", event
+        if wrapper is None:
+            continue
 
+        if isinstance(wrapper, dict):
 
-    if "ArchivedEvent" in event_wrapper:
+            event = wrapper.get(
+                "value",
+                wrapper
+            )
 
-        event = event_wrapper["ArchivedEvent"]
+        else:
+            event = wrapper
 
-        if isinstance(event, dict):
-            event = event.get("value", event)
-
-        return "archived", event
-
+        return event_type, event
 
     return None, None
 
 
+# =========================================================
+# HOLDING EXTRACTION
+# =========================================================
+
 def holding_from_created_event(event):
     """
-    If this CreatedEvent contains a Holding interface view,
-    convert it into the format our SQLite database expects.
+    Extract the Holding interface view from a CreatedEvent.
+
+    We deliberately continue using the Holding interface
+    rather than guessing from template names.
     """
 
-    for view in event.get("interfaceViews", []):
+    for interface_view in event.get(
+        "interfaceViews",
+        []
+    ):
 
-        value = view.get(
+        interface_id = interface_view.get(
+            "interfaceId"
+        )
+
+        # Ignore interface views that clearly are not
+        # the token Holding interface.
+        if (
+            interface_id is not None
+            and "Holding" not in str(interface_id)
+        ):
+            continue
+
+        value = interface_view.get(
             "viewValue",
             {}
         )
 
-        owner = value.get("owner")
-        amount = value.get("amount")
+        if not isinstance(value, dict):
+            continue
+
+        owner = value.get(
+            "owner"
+        )
+
+        amount = value.get(
+            "amount"
+        )
 
         instrument_id = value.get(
             "instrumentId",
             {}
         )
 
-        if owner is None or amount is None:
+        if (
+            owner is None
+            or amount is None
+            or not isinstance(
+                instrument_id,
+                dict
+            )
+        ):
             continue
 
         return {
@@ -91,57 +145,277 @@ def holding_from_created_event(event):
                 instrument_id.get("admin"),
 
             "locked":
-                value.get("lock") is not None,
+                value.get("lock") is not None
         }
 
     return None
 
 
-def process_transaction(transaction):
+# =========================================================
+# TRANSFER EXTRACTION
+# =========================================================
+
+def find_transfer_payload(value):
     """
-    Convert one Canton ACS-delta transaction into:
+    Search recursively for a structure containing:
 
-        Holdings to create
-        Holdings to archive
+        sender
+        receiver
+        amount
 
-    Then update:
-
-        holdings
-        holding_history
-        scanner_state
-
-    in one SQLite transaction.
+    We intentionally do NOT infer transfers merely from
+    Holding destruction/creation. Minting, fees and burns
+    can also change Holdings.
     """
 
-    offset = transaction.get("offset")
+    if isinstance(value, dict):
 
-    update_id = transaction.get("updateId")
+        if (
+            "sender" in value
+            and "receiver" in value
+            and "amount" in value
+        ):
+            return value
 
-    record_time = transaction.get("recordTime")
+        for child in value.values():
+
+            result = find_transfer_payload(
+                child
+            )
+
+            if result is not None:
+                return result
+
+    elif isinstance(value, list):
+
+        for child in value:
+
+            result = find_transfer_payload(
+                child
+            )
+
+            if result is not None:
+                return result
+
+    return None
+
+
+def transfer_from_exercised_event(
+    event,
+    event_id
+):
+    """
+    Extract a transfer only when the exercise clearly
+    represents a transfer and its arguments explicitly
+    contain sender, receiver and amount.
+    """
+
+    choice = event.get(
+        "choice",
+        ""
+    )
+
+    if "transfer" not in choice.lower():
+        return None
+
+    choice_argument = event.get(
+        "choiceArgument",
+        {}
+    )
+
+    transfer = find_transfer_payload(
+        choice_argument
+    )
+
+    if transfer is None:
+        return None
+
+    sender = transfer.get(
+        "sender"
+    )
+
+    receiver = transfer.get(
+        "receiver"
+    )
+
+    amount = transfer.get(
+        "amount"
+    )
+
+    if (
+        sender is None
+        or receiver is None
+        or amount is None
+    ):
+        return None
+
+    instrument = None
+
+    instrument_id = transfer.get(
+        "instrumentId"
+    )
+
+    if isinstance(
+        instrument_id,
+        dict
+    ):
+        instrument = instrument_id.get(
+            "id"
+        )
+
+    return {
+        "event_id": event_id,
+        "sender": sender,
+        "receiver": receiver,
+        "amount": str(amount),
+        "instrument": instrument,
+        "choice": choice
+    }
+
+
+# =========================================================
+# TRANSACTION EVENT LIST
+# =========================================================
+
+def get_transaction_events(transaction):
+    """
+    Support both:
+
+        events: [...]
+
+    and a tree-style:
+
+        rootEventIds
+        eventsById
+
+    so the scanner is not tied to one representation.
+    """
 
     events = transaction.get(
-        "events",
-        []
+        "events"
     )
+
+    if isinstance(events, list):
+        return events
+
+    events_by_id = (
+        transaction.get("eventsById")
+        or transaction.get("events_by_id")
+    )
+
+    if not isinstance(
+        events_by_id,
+        dict
+    ):
+        return []
+
+    roots = (
+        transaction.get("rootEventIds")
+        or transaction.get("root_event_ids")
+        or []
+    )
+
+    ordered_events = []
+    visited = set()
+
+    def walk(event_id):
+
+        if event_id in visited:
+            return
+
+        visited.add(
+            event_id
+        )
+
+        event_wrapper = events_by_id.get(
+            event_id
+        )
+
+        if event_wrapper is None:
+            return
+
+        ordered_events.append(
+            event_wrapper
+        )
+
+        event_type, event = unwrap_event(
+            event_wrapper
+        )
+
+        # Public-style tree data may not use wrappers.
+        if event is None:
+            event = event_wrapper
+
+        child_ids = (
+            event.get("childEventIds")
+            or event.get("child_event_ids")
+            or []
+        )
+
+        for child_id in child_ids:
+            walk(child_id)
+
+    for root_id in roots:
+        walk(root_id)
+
+    # If roots were absent, still preserve all visible events.
+    if not ordered_events:
+
+        ordered_events.extend(
+            events_by_id.values()
+        )
+
+    return ordered_events
+
+
+# =========================================================
+# PROCESS ONE PRIVATE TRANSACTION
+# =========================================================
+
+def process_transaction(transaction):
+
+    offset = transaction.get(
+        "offset"
+    )
+
+    update_id = (
+        transaction.get("updateId")
+        or transaction.get("update_id")
+    )
+
+    record_time = (
+        transaction.get("recordTime")
+        or transaction.get("record_time")
+    )
+
+    if offset is None:
+        print(
+            "transaction missing offset - ignoring"
+        )
+        return
+
+    if update_id is None:
+
+        # This should be unusual, but offset still gives us
+        # a deterministic identifier rather than inventing
+        # random data.
+        update_id = f"offset-{offset}"
 
     print()
     print("=" * 70)
-    print("TRANSACTION")
-    print("=" * 70)
+    print("PRIVATE TRANSACTION")
+    print("offset:", offset)
+    print("update:", update_id)
+    print("time:", record_time)
 
-    print(
-        "update id:",
-        update_id
-    )
+    created_holdings = []
+    archived_contract_ids = []
 
-    print(
-        "offset:",
-        offset
-    )
+    private_events = []
+    transfers = []
 
-    print(
-        "record time:",
-        record_time
+    events = get_transaction_events(
+        transaction
     )
 
     print(
@@ -149,139 +423,310 @@ def process_transaction(transaction):
         len(events)
     )
 
+    for index, event_wrapper in enumerate(
+        events
+    ):
 
-    if offset is None:
-        print("No transaction offset - skipping.")
-        return
-
-
-    if update_id is None:
-        print("No update ID - skipping.")
-        return
-
-
-    created_holdings = []
-
-    archived_contract_ids = []
-
-
-    for event_wrapper in events:
-
-        event_type, event = get_event(
+        event_type, event = unwrap_event(
             event_wrapper
         )
 
+        # Some tree representations may already contain
+        # the unwrapped event.
         if event is None:
+
+            event = event_wrapper
+
+            event_type = (
+                event.get("event_type")
+                or "UnknownEvent"
+            )
+
+        if not isinstance(
+            event,
+            dict
+        ):
             continue
 
+        event_id = (
+            event.get("eventId")
+            or event.get("event_id")
+            or event.get("contractId")
+            or event.get("contract_id")
+            or f"{update_id}:{index}"
+        )
 
-        # =================================================
+        template_id = (
+            event.get("templateId")
+            or event.get("template_id")
+        )
+
+        choice = event.get(
+            "choice"
+        )
+
+        private_events.append({
+            "event_id": str(event_id),
+            "event_type": event_type,
+            "template_id":
+                str(template_id)
+                if template_id is not None
+                else None,
+            "choice": choice,
+            "raw": event_wrapper
+        })
+
+        # -----------------------------------------------
         # CREATED HOLDING
-        # =================================================
+        # -----------------------------------------------
 
-        if event_type == "created":
+        if event_type in (
+            "CreatedEvent",
+            "CreatedTreeEvent"
+        ):
 
             holding = holding_from_created_event(
                 event
             )
 
-            if holding is None:
-                continue
+            if holding is not None:
 
+                created_holdings.append(
+                    holding
+                )
 
-            created_holdings.append(
-                holding
-            )
+                print(
+                    "holding created:",
+                    holding["party"].split("::")[0],
+                    holding["amount"],
+                    holding["instrument"]
+                )
 
+        # -----------------------------------------------
+        # ARCHIVED CONTRACT
+        #
+        # We pass all archived IDs to the database.
+        # It only removes one if that contract is actually
+        # present in our current Holding table.
+        # -----------------------------------------------
 
-            print(
-                "CREATE",
-                holding["party"].split("::")[0],
-                holding["amount"],
-                holding["instrument"]
-            )
-
-
-        # =================================================
-        # ARCHIVED HOLDING
-        # =================================================
-
-        elif event_type == "archived":
+        elif event_type == "ArchivedEvent":
 
             contract_id = event.get(
                 "contractId"
             )
 
-            if contract_id is None:
-                continue
+            if contract_id is not None:
 
+                archived_contract_ids.append(
+                    contract_id
+                )
 
-            archived_contract_ids.append(
-                contract_id
+        # -----------------------------------------------
+        # SEMANTIC TRANSFER
+        # -----------------------------------------------
+
+        elif event_type == "ExercisedEvent":
+
+            transfer = transfer_from_exercised_event(
+                event,
+                str(event_id)
             )
 
+            if transfer is not None:
 
-            print(
-                "ARCHIVE",
-                contract_id[:20] + "..."
-            )
+                transfers.append(
+                    transfer
+                )
 
+                print(
+                    "TRANSFER:",
+                    transfer["sender"].split("::")[0],
+                    "->",
+                    transfer["receiver"].split("::")[0],
+                    transfer["amount"],
+                    transfer["instrument"],
+                    "|",
+                    transfer["choice"]
+                )
 
-    # =====================================================
-    # UPDATE SQLITE
-    # =====================================================
-
-    # This one database function:
+    # --------------------------------------------------
+    # ONE ATOMIC SQLITE TRANSACTION
     #
-    # 1. records archived Holdings in history
-    # 2. deletes archived Holdings
-    # 3. inserts created Holdings
-    # 4. records created Holdings in history
-    # 5. saves the transaction offset
-    #
-    # All in ONE SQLite transaction.
+    # Holdings + raw history + transfers + offset
+    # all commit together.
+    # --------------------------------------------------
 
     database.apply_holding_changes(
-        created_holdings,
-        archived_contract_ids,
-        offset,
-        update_id,
-        record_time
-    )
+        created_holdings=
+            created_holdings,
 
+        archived_contract_ids=
+            archived_contract_ids,
+
+        offset=
+            int(offset),
+
+        update_id=
+            update_id,
+
+        record_time=
+            record_time,
+
+        private_events=
+            private_events,
+
+        transfers=
+            transfers
+    )
 
     print(
-        "SQLite updated to offset:",
-        offset
+        "saved:",
+        len(created_holdings),
+        "created holdings,",
+        len(archived_contract_ids),
+        "archives,",
+        len(private_events),
+        "events,",
+        len(transfers),
+        "transfers"
     )
-
-    print(
-        "created holdings:",
-        len(created_holdings)
-    )
-
-    print(
-        "archived holdings:",
-        len(archived_contract_ids)
-    )
-
 
     database.print_balances()
 
 
-def make_filters(parties):
-    """
-    Ask Canton only for Holding interface events
-    visible to our tracked parties.
-    """
+# =========================================================
+# MESSAGE PROCESSING
+# =========================================================
 
-    filters = {}
+def process_message(message):
+
+    # Canton wraps stream updates inside {"update": ...}.
+    update = message.get(
+        "update",
+        message
+    )
+
+    # --------------------------------------------------
+    # CHECKPOINT
+    # --------------------------------------------------
+
+    if "OffsetCheckpoint" in update:
+
+        checkpoint = update[
+            "OffsetCheckpoint"
+        ]
+
+        value = checkpoint.get(
+            "value",
+            checkpoint
+        )
+
+        offset = value.get(
+            "offset"
+        )
+
+        if offset is not None:
+
+            database.save_offset(
+                int(offset)
+            )
+
+            print(
+                "checkpoint:",
+                offset
+            )
+
+        return
+
+    # --------------------------------------------------
+    # TRANSACTION
+    # --------------------------------------------------
+
+    for transaction_key in (
+        "Transaction",
+        "TransactionTree"
+    ):
+
+        if transaction_key not in update:
+            continue
+
+        wrapper = update[
+            transaction_key
+        ]
+
+        transaction = (
+            wrapper.get(
+                "value",
+                wrapper
+            )
+            if isinstance(wrapper, dict)
+            else wrapper
+        )
+
+        process_transaction(
+            transaction
+        )
+
+        return
+
+    # --------------------------------------------------
+    # ERROR
+    # --------------------------------------------------
+
+    if (
+        "code" in message
+        or "cause" in message
+    ):
+
+        raise RuntimeError(
+            json.dumps(
+                message,
+                indent=2
+            )
+        )
+
+    print(
+        "unrecognised stream message:",
+        json.dumps(message)[:500]
+    )
 
 
-    for party in parties:
+# =========================================================
+# BUILD PRIVATE PARTY FILTERS
+# =========================================================
 
-        filters[party] = {
+def build_filters():
+
+    filters_by_party = {}
+
+    for prefix in PARTY_PREFIXES:
+
+        party = database.resolve_party(
+            prefix
+        )
+
+        if party is None:
+
+            raise RuntimeError(
+                f"Could not resolve tracked party: {prefix}"
+            )
+
+        print(
+            "tracking:",
+            party
+        )
+
+        filters_by_party[party] = {
             "cumulative": [
+
+                # ---------------------------------------
+                # HOLDING INTERFACE
+                #
+                # Required so created Holding events have
+                # the interface view used for balances.
+                # ---------------------------------------
+
                 {
                     "identifierFilter": {
                         "InterfaceFilter": {
@@ -297,300 +742,167 @@ def make_filters(parties):
                             }
                         }
                     }
+                },
+
+                # ---------------------------------------
+                # WILDCARD
+                #
+                # Gives us all other private events this
+                # party is entitled to see.
+                # ---------------------------------------
+
+                {
+                    "identifierFilter": {
+                        "WildcardFilter": {
+                            "value": {
+                                "includeCreatedEventBlob":
+                                    False
+                            }
+                        }
+                    }
                 }
             ]
         }
 
-
-    return filters
-
-
-# =========================================================
-# STARTUP
-# =========================================================
-
-database.create_tables()
-
-
-# Resolve our three short party prefixes into their full
-# Canton party identifiers.
-
-parties = [
-    c8lab.find_party(prefix)
-    for prefix in PARTY_PREFIXES
-]
-
-
-saved_offset = database.get_saved_offset()
-
-
-if saved_offset is None:
-
-    raise RuntimeError(
-        "No ACS snapshot found. Run scanner.py first."
-    )
-
-
-print(
-    "starting from offset:",
-    saved_offset
-)
-
-print(
-    "watching parties:",
-    len(parties)
-)
-
-
-filters_by_party = make_filters(
-    parties
-)
-
-
-# =========================================================
-# WEBSOCKET REQUEST
-# =========================================================
-
-request_body = {
-
-    "beginExclusive":
-        saved_offset,
-
-    "updateFormat": {
-
-        "includeTransactions": {
-
-            # ACS_DELTA gives us:
-            #
-            #     CreatedEvent
-            #     ArchivedEvent
-            #
-            # which maps directly onto the current
-            # holdings table.
-
-            "transactionShape":
-                "TRANSACTION_SHAPE_ACS_DELTA",
-
-            "eventFormat": {
-
-                "filtersByParty":
-                    filters_by_party,
-
-                "verbose":
-                    True
-            }
-        }
-    }
-}
-
-
-WS_URL = (
-    "wss://api.validator.dev.digik.cantor8.tech"
-    "/api/ledger/v2/updates"
-)
-
-
-# =========================================================
-# AUTHENTICATION
-# =========================================================
-
-token = c8lab.token()
-
-
-# =========================================================
-# CONNECT
-# =========================================================
-
-while True:
-
-    try:
-
-        ws = websocket.create_connection(
-            WS_URL,
-
-            header=[
-                f"Authorization: Bearer {token}"
-            ],
-
-            suppress_origin=True,
-
-            timeout=20
-        )
-
-
-        # The 20-second timeout is only useful while
-        # establishing the connection.
-        #
-        # Once connected, the ledger may legitimately be
-        # quiet for longer than 20 seconds.
-
-        ws.settimeout(None)
-
-
-        break
-
-
-    except (
-        TimeoutError,
-        websocket.WebSocketTimeoutException
-    ):
-
-        print(
-            "WebSocket connection timed out. Retrying..."
-        )
-
-        time.sleep(2)
-
-
-# =========================================================
-# SUBSCRIBE
-# =========================================================
-
-ws.send(
-    json.dumps(
-        request_body
-    )
-)
-
-
-print("connected")
-print("listening for Holding changes...")
-print()
+    return filters_by_party
 
 
 # =========================================================
 # STREAM
 # =========================================================
 
-try:
+def run_stream():
+
+    saved_offset = database.get_saved_offset()
+
+    if saved_offset is None:
+
+        raise RuntimeError(
+            "No saved scanner offset. "
+            "Run scanner.py first."
+        )
+
+    filters_by_party = build_filters()
+
+    request_body = {
+        "beginExclusive":
+            saved_offset,
+
+        "updateFormat": {
+            "includeTransactions": {
+
+                "transactionShape":
+                    "TRANSACTION_SHAPE_LEDGER_EFFECTS",
+
+                "eventFormat": {
+                    "filtersByParty":
+                        filters_by_party,
+
+                    "verbose":
+                        True
+                }
+            }
+        }
+    }
+
+    token = c8lab.token()
+
+    print()
+    print(
+        "starting private scanner from offset:",
+        saved_offset
+    )
+
+    ws = websocket.create_connection(
+        WS_URL,
+        header=[
+            f"Authorization: Bearer {token}"
+        ],
+        suppress_origin=True,
+        timeout=20
+    )
+
+    ws.settimeout(None)
+
+    ws.send(
+        json.dumps(
+            request_body
+        )
+    )
+
+    print(
+        "connected to Canton private update stream"
+    )
+
+    try:
+
+        while True:
+
+            raw = ws.recv()
+
+            if not raw:
+                continue
+
+            message = json.loads(
+                raw
+            )
+
+            process_message(
+                message
+            )
+
+    finally:
+
+        ws.close()
+
+
+# =========================================================
+# MAIN WITH RECONNECT
+# =========================================================
+
+def main():
+
+    database.create_tables()
 
     while True:
 
-        message = ws.recv()
+        try:
 
+            run_stream()
 
-        if not message:
-            continue
-
-
-        data = json.loads(
-            message
-        )
-
-
-        # =================================================
-        # API ERROR
-        # =================================================
-
-        if "code" in data:
+        except KeyboardInterrupt:
 
             print()
-            print("API ERROR")
-
-            print(
-                json.dumps(
-                    data,
-                    indent=2
-                )
-            )
-
+            print("scanner stopped")
             break
 
+        except Exception as error:
 
-        update = data.get(
-            "update",
-            {}
-        )
-
-
-        # =================================================
-        # OFFSET CHECKPOINT
-        # =================================================
-
-        if "OffsetCheckpoint" in update:
-
-            checkpoint = (
-                update["OffsetCheckpoint"]
-                .get("value", {})
+            print()
+            print(
+                "stream disconnected:"
             )
-
-
-            checkpoint_offset = (
-                checkpoint.get("offset")
-            )
-
 
             print(
-                "checkpoint:",
-                checkpoint_offset
+                str(error)[:1000]
             )
 
+            # c8lab caches the bearer token.
+            # Clear it so reconnect obtains a fresh token,
+            # which fixes stale stream authorization.
+            if hasattr(
+                c8lab,
+                "_tok"
+            ):
+                c8lab._tok.clear()
 
-            if checkpoint_offset is not None:
-
-                # No matching Holding transaction occurred
-                # between our previous position and this
-                # checkpoint.
-                #
-                # Therefore it is safe to advance our
-                # resume position.
-
-                database.save_offset(
-                    checkpoint_offset
-                )
-
-
-            continue
-
-
-        # =================================================
-        # TRANSACTION
-        # =================================================
-
-        if "Transaction" in update:
-
-            transaction = (
-                update["Transaction"]
-                .get("value", {})
+            print(
+                "retrying..."
             )
 
-
-            process_transaction(
-                transaction
-            )
+            time.sleep(2)
 
 
-            continue
-
-
-        # =================================================
-        # UNKNOWN UPDATE
-        # =================================================
-
-        print(
-            "OTHER UPDATE:",
-            json.dumps(
-                data,
-                indent=2
-            )
-        )
-
-
-# =========================================================
-# MANUAL STOP
-# =========================================================
-
-except KeyboardInterrupt:
-
-    print()
-    print("Stopping scanner...")
-
-
-# =========================================================
-# CLEANUP
-# =========================================================
-
-finally:
-
-    ws.close()
+if __name__ == "__main__":
+    main()
 
