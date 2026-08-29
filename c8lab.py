@@ -23,7 +23,7 @@ prefixes every route, and their admin is not the DSO:
     export C8_ADMIN_PARTY=cantor8-digik-1::1220...
     python3 c8lab.py transfer alice bob 5 --instrument c8TEST
 """
-import argparse, base64, datetime, hmac, hashlib, json, os, sys, uuid
+import argparse, base64, binascii, datetime, hmac, hashlib, json, os, sys, uuid
 import urllib.error, urllib.parse, urllib.request
 
 BASE     = os.environ.get("C8_BASE", "http://localhost:2975")
@@ -107,11 +107,11 @@ def _request(url, body=None, headers=None, method=None, timeout=30):
         return {"raw": raw.decode(errors="replace")[:600]}
 
 
-def call(path, body=None, sub=USER, method=None):
+def call(path, body=None, sub=USER, method=None, timeout=30):
     """Ledger API call."""
     return _request(BASE + path, body,
                     {"Authorization": f"Bearer {token(sub)}",
-                     "Content-Type": "application/json"}, method)
+                     "Content-Type": "application/json"}, method, timeout)
 
 
 def registry(path, body=None, method=None):
@@ -127,6 +127,61 @@ def registry(path, body=None, method=None):
 
 def ledger_end(sub=USER):
     return call("/v2/state/ledger-end", sub=sub)["offset"]
+
+
+def token_claims(value=None):
+    """Decode JWT claims without logging or validating the bearer token."""
+    value = value or token()
+    try:
+        payload = value.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload))
+    except (
+        binascii.Error,
+        IndexError,
+        UnicodeDecodeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as e:
+        raise LabError("Ledger bearer token does not contain readable JWT claims") from e
+
+
+def authenticated_user_id():
+    """Return the Canton user represented by the current credentials."""
+    configured = os.environ.get("C8_USER")
+    if configured:
+        return configured
+    if IDP:
+        user_id = token_claims().get("sub")
+        if not user_id:
+            raise LabError("DevNet bearer token has no 'sub' Canton user claim")
+        return user_id
+    return USER
+
+
+def user_rights(user_id=None):
+    """List rights directly instead of probing ACS access party by party."""
+    user_id = user_id or authenticated_user_id()
+    return call(
+        f"/v2/users/{urllib.parse.quote(user_id, safe='')}/rights",
+        sub=user_id,
+        method="GET",
+    ).get("rights", [])
+
+
+def party_page(page_size=10_000, page_token=None, sub=None):
+    """Read one native page from Canton's known-party directory."""
+    params = {"pageSize": int(page_size)}
+    if page_token:
+        params["pageToken"] = page_token
+    path = "/v2/parties?" + urllib.parse.urlencode(params)
+    # DevNet's shared directory can take close to a minute under load.
+    return call(
+        path,
+        sub=sub or authenticated_user_id(),
+        method="GET",
+        timeout=120,
+    )
 
 
 def parties(sub=ADMIN):

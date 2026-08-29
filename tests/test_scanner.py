@@ -1,16 +1,22 @@
+import base64
 import json
 import importlib
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import c8lab
 import database
+import scanner
 import updates
 
 
 ALICE = "00209eb9a1e8485ba9a7383aa6115ab2::1220alice"
 BOB = "0024bd501a4e4ea2b36125d43107085b::1220bob"
 ADMIN = "admin::1220admin"
+CAROL = "carol::1220carol"
 FIXTURE = Path(__file__).parent / "fixtures" / "private_transaction.json"
 
 
@@ -23,6 +29,94 @@ def holding(contract_id, party, amount):
         "admin": ADMIN,
         "locked": False,
     }
+
+
+def catalog_entry(party, readable=True, **overrides):
+    entry = {
+        "party": party,
+        "display_name": party.split("::", 1)[0],
+        "is_local": True,
+        "can_act_as": False,
+        "can_read_as": False,
+        "readable": readable,
+        "source": "read_any_local",
+    }
+    entry.update(overrides)
+    return entry
+
+
+class AuthenticationAndDiscoveryTests(unittest.TestCase):
+    def test_authenticated_user_resolution_override_devnet_and_localnet(self):
+        with mock.patch.dict(os.environ, {"C8_USER": "explicit-user"}):
+            self.assertEqual(c8lab.authenticated_user_id(), "explicit-user")
+
+        payload = base64.urlsafe_b64encode(
+            json.dumps({"sub": "devnet-user"}).encode()
+        ).decode().rstrip("=")
+        bearer = f"header.{payload}.signature"
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+            c8lab, "IDP", "https://identity.example"
+        ), mock.patch.object(c8lab, "token", return_value=bearer):
+            self.assertEqual(c8lab.authenticated_user_id(), "devnet-user")
+
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+            c8lab, "IDP", None
+        ), mock.patch.object(c8lab, "USER", "local-user"):
+            self.assertEqual(c8lab.authenticated_user_id(), "local-user")
+
+    def test_rights_parsing_includes_act_read_excludes_execute(self):
+        rights = [
+            {"kind": {"CanActAs": {"value": {"party": ALICE}}}},
+            {"kind": {"CanReadAs": {"value": {"party": BOB}}}},
+            {"kind": {"CanExecuteAs": {"value": {"party": CAROL}}}},
+            {"kind": {"CanReadAsAnyParty": {"value": {}}}},
+        ]
+        explicit, read_any = scanner.parse_user_rights(rights)
+        self.assertTrue(read_any)
+        self.assertEqual(
+            explicit,
+            {
+                ALICE: {"can_act_as": True, "can_read_as": False},
+                BOB: {"can_act_as": False, "can_read_as": True},
+            },
+        )
+
+    def test_read_any_discovery_pages_local_parties_and_merges_rights(self):
+        rights = [
+            {"kind": {"CanActAs": {"value": {"party": ALICE}}}},
+            {"kind": {"CanReadAs": {"value": {"party": CAROL}}}},
+            {"kind": {"CanReadAsAnyParty": {"value": {}}}},
+        ]
+        pages = [
+            {
+                "partyDetails": [
+                    {"party": ALICE, "isLocal": True},
+                    {"party": "remote::1220remote", "isLocal": False},
+                ],
+                "nextPageToken": "next",
+            },
+            {"partyDetails": [{"party": BOB, "isLocal": True}]},
+        ]
+        with mock.patch.object(
+            c8lab, "authenticated_user_id", return_value="scanner-user"
+        ), mock.patch.object(
+            c8lab, "user_rights", return_value=rights
+        ), mock.patch.object(
+            c8lab, "party_page", side_effect=pages
+        ) as party_page, mock.patch.object(
+            scanner,
+            "holdings_at_offset",
+            side_effect=AssertionError("discovery must not read Holdings"),
+        ):
+            result = scanner.discover_authorized_parties()
+
+        entries = {entry["party"]: entry for entry in result["entries"]}
+        self.assertEqual(set(entries), {ALICE, BOB, CAROL})
+        self.assertTrue(entries[ALICE]["can_act_as"])
+        self.assertEqual(entries[ALICE]["source"], "explicit_right+read_any_local")
+        self.assertIsNone(entries[CAROL]["is_local"])
+        self.assertEqual(party_page.call_count, 2)
+        self.assertEqual(party_page.call_args_list[1].kwargs["page_token"], "next")
 
 
 class TemporaryScannerDatabase(unittest.TestCase):
@@ -45,6 +139,17 @@ class TemporaryScannerDatabase(unittest.TestCase):
 
 
 class DatabaseTests(TemporaryScannerDatabase):
+    def test_existing_database_migration_preserves_holdings_and_offset(self):
+        database.save_offset(9)
+        database.replace_holdings_for_party(ALICE, [holding("legacy", ALICE, "1")])
+        database.create_tables()
+        self.assertEqual(database.get_saved_offset(), 9)
+        self.assertEqual(self.rows("SELECT contract_id FROM holdings"), [("legacy",)])
+        status = database.get_selection_status()
+        self.assertEqual(status["desired_parties"], [ALICE])
+        self.assertEqual(status["active_parties"], [ALICE])
+        self.assertFalse(status["restart_required"])
+
     def test_holding_created_then_archived(self):
         database.save_offset(10)
         self.assertTrue(
@@ -151,6 +256,195 @@ class DatabaseTests(TemporaryScannerDatabase):
             ),
             [],
         )
+
+
+class CatalogAndSelectionTests(TemporaryScannerDatabase):
+    def test_catalog_replacement_is_atomic_and_failed_refresh_retains_cache(self):
+        database.replace_party_catalog(
+            [catalog_entry(ALICE)], "user-one", read_as_any=True
+        )
+        with self.assertRaises(ValueError):
+            database.replace_party_catalog(
+                [catalog_entry(BOB), {"display_name": "missing-party"}],
+                "user-two",
+                read_as_any=False,
+            )
+        database.record_party_catalog_error("directory timed out")
+        response = database.list_parties()
+        self.assertEqual([item["party"] for item in response["items"]], [ALICE])
+        state = database.get_party_catalog_state()
+        self.assertFalse(state["complete"])
+        self.assertEqual(state["error"], "directory timed out")
+        self.assertEqual(state["user_id"], "user-one")
+
+    def test_revoked_selected_party_is_retained_as_unreadable(self):
+        database.replace_party_catalog(
+            [catalog_entry(ALICE), catalog_entry(BOB)], "user", True
+        )
+        database.set_desired_parties([ALICE])
+        database.replace_party_catalog([catalog_entry(BOB)], "user", True)
+        items = {
+            item["party"]: item for item in database.list_parties()["items"]
+        }
+        self.assertFalse(items[ALICE]["readable"])
+        self.assertTrue(items[ALICE]["selected"])
+        self.assertTrue(items[BOB]["readable"])
+
+    def test_first_catalog_refresh_materializes_revoked_legacy_selection(self):
+        database.save_offset(10)
+        database.replace_holdings_for_party(ALICE, [holding("legacy", ALICE, "1")])
+        database.create_tables()
+        database.replace_party_catalog([], "new-user", False)
+        items = database.list_parties()["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["party"], ALICE)
+        self.assertTrue(items[0]["selected"])
+        self.assertTrue(items[0]["active"])
+        self.assertFalse(items[0]["readable"])
+
+    def test_search_pagination_flags_and_selection_revisions(self):
+        database.replace_party_catalog(
+            [catalog_entry(ALICE), catalog_entry(BOB), catalog_entry(CAROL)],
+            "user",
+            True,
+        )
+        first = database.set_desired_parties([BOB, ALICE, ALICE])
+        self.assertEqual(first["desired_parties"], [ALICE, BOB])
+        self.assertEqual(first["desired_revision"], 1)
+        same = database.set_desired_parties([ALICE, BOB])
+        self.assertEqual(same["desired_revision"], 1)
+
+        result = database.list_parties("002", limit=1, offset=1)
+        self.assertEqual(result["total"], 2)
+        self.assertEqual(len(result["items"]), 1)
+        self.assertTrue(result["items"][0]["selected"])
+
+    def test_selection_rejects_empty_prefix_unknown_inaccessible_and_oversized(self):
+        database.replace_party_catalog(
+            [catalog_entry(ALICE), catalog_entry(BOB, readable=False)],
+            "user",
+            False,
+        )
+        invalid = (
+            ([], 50),
+            ([ALICE.split("::")[0]], 50),
+            ([CAROL], 50),
+            ([BOB], 50),
+            ([ALICE, BOB], 1),
+        )
+        for parties, maximum in invalid:
+            with self.subTest(parties=parties, maximum=maximum):
+                with self.assertRaises(ValueError):
+                    database.set_desired_parties(parties, maximum)
+
+    def test_reconciliation_preserves_history_and_activates_atomically(self):
+        database.replace_party_catalog(
+            [catalog_entry(ALICE), catalog_entry(BOB)], "user", True
+        )
+        initial = database.set_desired_parties([ALICE])
+        database.replace_all_holdings_and_save_offset(
+            {ALICE: [holding("alice-holding", ALICE, "1")]},
+            100,
+            expected_revision=initial["desired_revision"],
+        )
+        database.apply_holding_changes(
+            [],
+            [],
+            101,
+            "transfer-update",
+            transfers=[
+                {
+                    "event_id": "transfer-event",
+                    "sender": ALICE,
+                    "receiver": BOB,
+                    "amount": "0.5",
+                    "instrument": "Amulet",
+                    "choice": "TransferFactory_Transfer",
+                }
+            ],
+        )
+        pending = database.set_desired_parties([BOB])
+        database.reconcile_tracked_parties(
+            {BOB: [holding("bob-holding", BOB, "2")]},
+            [ALICE],
+            101,
+            pending["desired_revision"],
+        )
+        self.assertEqual(self.rows("SELECT party FROM holdings"), [(BOB,)])
+        self.assertEqual(len(database.get_transfers_for_party(ALICE)), 1)
+        self.assertEqual(database.get_saved_offset(), 101)
+        self.assertFalse(database.get_party_tracking(ALICE)["active"])
+        self.assertEqual(
+            database.get_party_tracking(ALICE)["deactivated_at_offset"], 101
+        )
+        self.assertEqual(database.get_party_tracking(BOB)["activated_at_offset"], 101)
+        self.assertFalse(database.get_selection_status()["restart_required"])
+
+    def test_revision_race_rolls_back_reconciliation(self):
+        database.replace_party_catalog(
+            [catalog_entry(ALICE), catalog_entry(BOB)], "user", True
+        )
+        initial = database.set_desired_parties([ALICE])
+        database.replace_all_holdings_and_save_offset(
+            {ALICE: [holding("alice-holding", ALICE, "1")]},
+            100,
+            expected_revision=initial["desired_revision"],
+        )
+        stale = database.set_desired_parties([BOB])
+        database.set_desired_parties([ALICE])
+        with self.assertRaises(ValueError):
+            database.reconcile_tracked_parties(
+                {BOB: [holding("bob-holding", BOB, "2")]},
+                [ALICE],
+                100,
+                stale["desired_revision"],
+            )
+        self.assertEqual(self.rows("SELECT contract_id FROM holdings"), [("alice-holding",)])
+        self.assertEqual(database.get_active_parties(), [ALICE])
+
+
+class ScannerWorkflowTests(TemporaryScannerDatabase):
+    def test_first_bootstrap_reads_desired_acs_at_one_ledger_offset(self):
+        database.replace_party_catalog([catalog_entry(ALICE)], "user", False)
+        database.set_desired_parties([ALICE])
+        with mock.patch.object(c8lab, "ledger_end", return_value=500), mock.patch.object(
+            scanner,
+            "holdings_at_offset",
+            return_value=[holding("initial", ALICE, "1")],
+        ) as read_acs:
+            scanner.bootstrap_or_reconcile()
+
+        read_acs.assert_called_once_with(ALICE, 500)
+        self.assertEqual(database.get_saved_offset(), 500)
+        self.assertEqual(database.get_active_parties(), [ALICE])
+        self.assertEqual(self.rows("SELECT contract_id FROM holdings"), [("initial",)])
+
+    def test_acs_denial_or_pruning_leaves_prior_active_selection_intact(self):
+        database.replace_party_catalog(
+            [catalog_entry(ALICE), catalog_entry(BOB)], "user", True
+        )
+        initial = database.set_desired_parties([ALICE])
+        database.replace_all_holdings_and_save_offset(
+            {ALICE: [holding("existing", ALICE, "1")]},
+            600,
+            expected_revision=initial["desired_revision"],
+        )
+        database.set_desired_parties([BOB])
+
+        for message in ("HTTP 403 permission denied", "activeAtOffset was pruned"):
+            with self.subTest(message=message), mock.patch.object(
+                scanner,
+                "holdings_at_offset",
+                side_effect=c8lab.LabError(message),
+            ):
+                with self.assertRaises(c8lab.LabError):
+                    scanner.bootstrap_or_reconcile()
+            self.assertEqual(database.get_saved_offset(), 600)
+            self.assertEqual(database.get_active_parties(), [ALICE])
+            self.assertEqual(
+                self.rows("SELECT contract_id FROM holdings"), [("existing",)]
+            )
+            self.assertTrue(database.get_selection_status()["restart_required"])
 
 
 class UpdateParsingTests(TemporaryScannerDatabase):
@@ -266,6 +560,19 @@ class UpdateParsingTests(TemporaryScannerDatabase):
         self.assertIn("InterfaceFilter", cumulative[0]["identifierFilter"])
         self.assertIn("WildcardFilter", cumulative[1]["identifierFilter"])
 
+    def test_live_filters_use_active_parties_and_refuse_pending_selection(self):
+        database.replace_party_catalog(
+            [catalog_entry(ALICE), catalog_entry(BOB)], "user", True
+        )
+        initial = database.set_desired_parties([ALICE])
+        database.replace_all_holdings_and_save_offset(
+            {ALICE: []}, 70, expected_revision=initial["desired_revision"]
+        )
+        self.assertEqual(set(updates.build_filters()), {ALICE})
+        database.set_desired_parties([BOB])
+        with self.assertRaises(updates.SelectionChangePending):
+            updates.build_filters()
+
     def test_checkpoint_does_not_regress_resume_offset(self):
         database.save_offset(90)
         updates.process_message(
@@ -298,7 +605,12 @@ class ApiTests(TemporaryScannerDatabase):
         )
         api = importlib.import_module("api")
 
-        self.assertEqual(api.health(), {"status": "ok", "last_offset": 201})
+        health = api.health()
+        self.assertEqual(health["status"], "ok")
+        self.assertEqual(health["last_offset"], 201)
+        self.assertEqual(health["active_party_count"], 1)
+        self.assertEqual(health["desired_party_count"], 1)
+        self.assertFalse(health["restart_required"])
         self.assertEqual(
             api.balance(ALICE)["balances"],
             [{"instrument": "Amulet", "amount": "1.1"}],
@@ -310,6 +622,35 @@ class ApiTests(TemporaryScannerDatabase):
         received = api.history(BOB, limit=10)["transfers"][0]
         self.assertEqual(received["direction"], "received")
         self.assertEqual(received["counterparty"], ALICE)
+
+    def test_cached_party_api_and_persisted_selection(self):
+        database.replace_party_catalog(
+            [catalog_entry(ALICE), catalog_entry(BOB)], "api-user", True
+        )
+        initial = database.set_desired_parties([ALICE])
+        database.replace_all_holdings_and_save_offset(
+            {ALICE: []}, 300, expected_revision=initial["desired_revision"]
+        )
+        api = importlib.import_module("api")
+
+        response = api.parties(q="002", limit=50, offset=0)
+        self.assertEqual(response["total"], 2)
+        flags = {item["party"]: item for item in response["items"]}
+        self.assertTrue(flags[ALICE]["selected"])
+        self.assertTrue(flags[ALICE]["active"])
+        self.assertFalse(response["restart_required"])
+        self.assertEqual(response["catalog"]["user_id"], "api-user")
+
+        selection = api.update_party_selection(
+            api.PartySelectionRequest(parties=[BOB])
+        )
+        self.assertEqual(selection["desired_parties"], [BOB])
+        self.assertEqual(selection["active_parties"], [ALICE])
+        self.assertTrue(selection["restart_required"])
+
+        with self.assertRaises(Exception) as raised:
+            api.balance(BOB)
+        self.assertEqual(raised.exception.status_code, 409)
 
 
 if __name__ == "__main__":

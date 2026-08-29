@@ -1,9 +1,10 @@
 # Canton private ledger scanner
 
 This is a small, resumable indexer for the Cantor8 A1 scanner challenge. It
-builds a local view of Canton Coin Holdings and semantic transfers for three
-fixed parties by reading the **private Canton Ledger API**. The public Scan API
-is not used as the source of scanner history.
+builds a local view of Canton Coin Holdings and semantic transfers for a
+user-selected set of authorized parties by reading the **private Canton Ledger
+API**. The original three demo parties remain the fresh-database defaults. The
+public Scan API is not used as the source of scanner history.
 
 ## Why a private scanner?
 
@@ -20,13 +21,17 @@ party**; it does not mean every party or event on the participant.
 
 ```mermaid
 flowchart LR
+    R["Authenticated Canton user rights"]
+    C["Cached local-party catalog"]
+    S["Desired party selection"]
     L["Private Canton Ledger API"]
-    A["scanner.py<br/>ACS at fixed ledger end"]
+    A["scanner.py<br/>ACS reconciliation at fixed offset"]
     U["updates.py<br/>party-scoped live stream"]
     P["Conservative event parser"]
     D[("SQLite<br/>holdings + events + transfers + offset")]
     F["FastAPI"]
 
+    R --> C --> S --> A
     L -->|"active contracts at offset N"| A
     A -->|"atomic snapshot + N"| D
     L -->|"beginExclusive N"| U
@@ -35,16 +40,32 @@ flowchart LR
     D --> F
 ```
 
-The startup order is intentional:
+On an empty catalog, `scanner.py` identifies the authenticated Canton user,
+lists that user's rights, and caches the readable party catalog. `CanActAs` and
+`CanReadAs` add explicit parties. `CanReadAsAnyParty` enables paged party
+directory discovery, restricted to `isLocal` parties. Discovery never probes
+Holdings.
 
-1. `scanner.py` reads the ledger end once.
-2. It reads every tracked party's Active Contract Set at that exact offset.
-3. It commits all current Holdings and the same offset atomically.
-4. `updates.py` streams from `beginExclusive` at the saved offset.
+The bootstrap order is intentional:
+
+1. The desired selection is loaded from SQLite.
+2. `scanner.py` reads the ledger end once.
+3. It reads every selected party's Active Contract Set at that exact offset.
+4. It commits all current Holdings, active parties, revision, and the same
+   offset atomically.
+5. `updates.py` streams from `beginExclusive` at the saved offset.
 
 Starting the stream with a zero balance would be incorrect. Re-running
-`scanner.py` against an initialized database is a safe no-op; normal restarts
-go directly to `updates.py`.
+`scanner.py` against an initialized database with no pending selection is a
+safe no-op; normal restarts go directly to `updates.py`.
+
+Selection changes are controlled restarts. The API updates only the desired
+set and revision. `updates.py` notices that pending revision after a stream
+message or checkpoint, closes the socket, and asks the operator to run
+`scanner.py`. At the existing saved offset, the scanner reads ACS only for
+additions, removes current Holdings for deselections, and atomically activates
+the new revision. Historical events and transfers are retained. Any ACS error,
+pruned offset, or revision race rolls the reconciliation back.
 
 ## Persistence and correctness
 
@@ -55,6 +76,10 @@ go directly to `updates.py`.
 - `holding_history`: low-level create/archive accounting effects.
 - `private_events`: durable raw private events useful after participant pruning.
 - `transfers`: only confidently reconstructed semantic transfers.
+- `party_catalog` and `party_catalog_state`: the cached rights-aware selector.
+- `party_selection`: the desired set.
+- `tracked_parties`: current/inactive indexing state and transition offsets.
+- `scanner_config`: desired and active selection revisions.
 
 For each live ledger transaction, Holding changes, raw events, semantic
 transfers, and the offset commit together. A failure rolls all of them back.
@@ -104,12 +129,16 @@ set +a
 ```
 
 Never commit `.env`, `scanner.db`, tokens, or `C8_CLIENT_SECRET`. Do not use
-`c8lab.py check` on DevNet; it walks too many parties. The scanner uses only the
-three fixed prefixes in `scanner.py` and `updates.py`.
+`c8lab.py check` on DevNet; it reads Holdings for thousands of parties. Catalog
+discovery pages the native party directory only when the user has
+`CanReadAsAnyParty`, filters it to local parties, and caches the result.
+Set `C8_USER` to override the Canton user explicitly. Otherwise DevNet uses the
+bearer token's `sub`; LocalNet keeps the toolkit's `ledger-api-user` default.
 
 ## Run the demo
 
-Terminal 1, first run only:
+For the default demo, the first run discovers parties and selects the original
+three only if all three remain readable:
 
 ```bash
 source .venv/bin/activate
@@ -117,6 +146,29 @@ set -a; source .env; set +a
 python scanner.py
 python updates.py
 ```
+
+For an explicit selection, populate the catalog without bootstrapping, start
+the API, inspect the cache, and save full party IDs:
+
+```bash
+python scanner.py --catalog-only
+uvicorn api:app --reload
+curl 'http://127.0.0.1:8000/parties?q=00209&limit=50&offset=0'
+curl -X PUT http://127.0.0.1:8000/parties/selection \
+  -H 'Content-Type: application/json' \
+  -d '{"parties":["full::party-id"]}'
+python scanner.py
+python updates.py
+```
+
+Refresh the slow party catalog only when needed:
+
+```bash
+python scanner.py --refresh-parties --catalog-only
+```
+
+The default selection limit is 50; set `SCANNER_MAX_PARTIES` before starting
+the API to change it.
 
 After the ACS has been bootstrapped, restart directly from the saved offset:
 
@@ -144,9 +196,12 @@ curl http://127.0.0.1:8000/history/00209eb9a1e8485ba9a7383aa6115ab2
 Endpoints:
 
 - `GET /health` — readiness and latest indexed offset.
+- `GET /parties?q=&limit=50&offset=0` — cached searchable authorized parties,
+  selection state, and catalog metadata; it performs no live Canton calls.
+- `PUT /parties/selection` — persist a validated desired set of full party IDs.
 - `GET /balance/{party}` — current Decimal-aggregated balances.
 - `GET /history/{party}` — semantic transfers with `sent`, `received`, or
-  `self` direction and counterparty.
+  `self` direction and counterparty, including current indexing status.
 - `GET /debug/holding-history/{party}` — low-level Holding effects.
 - `GET /docs` — generated interactive API documentation.
 
@@ -160,20 +215,20 @@ python -m unittest discover -s tests -v
 python -m py_compile database.py scanner.py updates.py api.py c8lab.py
 ```
 
-Coverage includes Holding create/archive, consuming exercises, semantic and
-non-semantic exercises, raw-event persistence, atomic rollback, replay
-idempotency, monotonic checkpoints, prefix resolution, exact Decimal balances,
-tree/list transaction envelopes, and restart request construction.
+Coverage includes authenticated-user resolution, rights parsing, paged
+local-only discovery, atomic cache replacement, legacy database migration,
+selection validation and revisions, exact-offset reconciliation and rollback,
+active-only update filters, Holding create/archive, semantic history, replay,
+Decimal balances, crash consistency, and restart request construction.
 
 ## Known limitations
 
 - The participant reported private history pruned before approximately offset
   `2909305`. Transfers before the scanner's starting point cannot be recovered
   from this participant.
-- The current local database was bootstrapped around offset `2920767`; no
-  qualifying post-bootstrap `TransferFactory_Transfer` has yet been observed,
-  so semantic history is verified with fixtures but not a successful transfer
-  between the three DevNet parties.
+- The current local database was bootstrapped around offset `2920767`; schema
+  migration seeds its existing Holdings parties as both desired and active
+  without changing that offset or rereading ACS.
 - A prior transfer attempt between tracked parties failed with
   `NO_SYNCHRONIZER_ON_WHICH_ALL_SUBMITTERS_CAN_SUBMIT`. Read visibility does not
   imply those parties can submit together.

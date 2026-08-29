@@ -12,13 +12,6 @@ except ImportError:  # Pure parser/database tests do not need the WS dependency.
 import c8lab
 import database
 
-
-PARTY_PREFIXES = [
-    "00209eb9a1e8485ba9a7383aa6115ab2",
-    "0024bd501a4e4ea2b36125d43107085b",
-    "002b2054df5f43b49524971477dfab81",
-]
-
 WS_URL = (
     "wss://api.validator.dev.digik.cantor8.tech"
     "/api/ledger/v2/updates"
@@ -35,6 +28,10 @@ EVENT_WRAPPERS = (
     "ArchivedEvent",
     "ExercisedEvent",
 )
+
+
+class SelectionChangePending(RuntimeError):
+    """The stream must stop so scanner.py can reconcile party state."""
 
 
 def unwrap_event(event_wrapper):
@@ -387,12 +384,15 @@ def build_filters_for_parties(parties):
 
 
 def build_filters():
-    parties = []
-    for prefix in PARTY_PREFIXES:
-        party = database.resolve_party(prefix)
-        if party is None:
-            raise RuntimeError(f"Could not resolve tracked party: {prefix}")
-        parties.append(party)
+    status = database.get_selection_status()
+    if status["restart_required"]:
+        raise SelectionChangePending(
+            "Party selection changed. Run scanner.py before restarting updates.py."
+        )
+    parties = status["active_parties"]
+    if not parties:
+        raise RuntimeError("No active tracked parties. Run scanner.py first.")
+    for party in parties:
         print("tracking:", party)
     return build_filters_for_parties(parties)
 
@@ -438,6 +438,11 @@ def run_stream():
             raw = ws.recv()
             if raw:
                 process_message(json.loads(raw))
+                if database.get_selection_status()["restart_required"]:
+                    raise SelectionChangePending(
+                        "Party selection changed. Run scanner.py before "
+                        "restarting updates.py."
+                    )
     finally:
         ws.close()
 
@@ -449,6 +454,10 @@ def main():
             run_stream()
         except KeyboardInterrupt:
             print("\nscanner stopped")
+            break
+        except SelectionChangePending as error:
+            print("\nupdates stopped cleanly:")
+            print(str(error))
             break
         except Exception as error:
             print("\nstream disconnected:")

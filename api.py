@@ -1,6 +1,9 @@
-"""FastAPI read API for the local private ledger index."""
+"""FastAPI API for the local private ledger index and party selector."""
+
+import os
 
 from fastapi import FastAPI, HTTPException, Query
+from pydantic import BaseModel
 
 import database
 
@@ -12,6 +15,12 @@ app = FastAPI(
 )
 
 database.create_tables()
+
+MAX_SELECTED_PARTIES = int(os.environ.get("SCANNER_MAX_PARTIES", "50"))
+
+
+class PartySelectionRequest(BaseModel):
+    parties: list[str]
 
 
 def get_party_or_404(party):
@@ -32,19 +41,69 @@ def get_party_or_404(party):
 @app.get("/health")
 def health():
     last_offset = database.get_saved_offset()
+    catalog = database.get_party_catalog_state()
+    selection = database.get_selection_status()
     return {
         "status": "ok" if last_offset is not None else "bootstrap_required",
         "last_offset": last_offset,
+        "catalog": catalog,
+        "active_party_count": selection["active_count"],
+        "desired_party_count": selection["desired_count"],
+        "restart_required": selection["restart_required"],
     }
+
+
+@app.get("/parties")
+def parties(
+    q: str = "",
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    """Search only the cached authorized-party catalog."""
+
+    response = database.list_parties(q, limit, offset)
+    catalog = database.get_party_catalog_state()
+    selection = database.get_selection_status()
+    response.update(
+        {
+            "catalog": catalog,
+            "active_count": selection["active_count"],
+            "desired_count": selection["desired_count"],
+            "active_revision": selection["active_revision"],
+            "desired_revision": selection["desired_revision"],
+            "restart_required": selection["restart_required"],
+        }
+    )
+    return response
+
+
+@app.put("/parties/selection")
+def update_party_selection(request: PartySelectionRequest):
+    """Persist a desired selection; scanner.py activates it later."""
+
+    try:
+        return database.set_desired_parties(
+            request.parties,
+            max_parties=MAX_SELECTED_PARTIES,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 @app.get("/balance/{party}")
 def balance(party: str):
     full_party = get_party_or_404(party)
+    tracking = database.get_party_tracking(full_party)
+    if tracking is None or not tracking["active"]:
+        raise HTTPException(
+            status_code=409,
+            detail="Party is not actively indexed. Run scanner.py after selecting it.",
+        )
     return {
         "party": full_party,
         "balances": database.get_balance_for_party(full_party),
         "last_offset": database.get_saved_offset(),
+        "active": True,
     }
 
 
@@ -78,6 +137,9 @@ def history(
         "transfers": transfers,
         "count": len(transfers),
         "last_offset": database.get_saved_offset(),
+        "active": bool(
+            (database.get_party_tracking(full_party) or {}).get("active")
+        ),
     }
 
 
