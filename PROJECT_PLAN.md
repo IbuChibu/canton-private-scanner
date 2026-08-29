@@ -86,6 +86,8 @@ Only one request of each type may be in flight; stale requests must be aborted.
 
 ### Milestone 1 — Frontend shell and same-origin serving
 
+**Status: complete.**
+
 - Create semantic HTML for the header, status strip, party explorer, balance
   cards, transfer table, empty states, error banner, and admin dialog.
 - Build a small CSS design system using custom properties for color, spacing,

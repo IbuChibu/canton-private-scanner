@@ -1,8 +1,11 @@
 """FastAPI API for the local private ledger index and party selector."""
 
 import os
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import database
@@ -17,10 +20,24 @@ app = FastAPI(
 database.create_tables()
 
 MAX_SELECTED_PARTIES = int(os.environ.get("SCANNER_MAX_PARTIES", "50"))
+FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
+
+app.mount(
+    "/assets",
+    StaticFiles(directory=str(FRONTEND_DIR)),
+    name="frontend-assets",
+)
 
 
 class PartySelectionRequest(BaseModel):
     parties: list[str]
+
+
+@app.get("/", include_in_schema=False)
+def frontend():
+    """Serve the scanner dashboard from the same origin as the API."""
+
+    return FileResponse(FRONTEND_DIR / "index.html")
 
 
 def get_party_or_404(party):

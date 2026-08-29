@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="A private, resumable Canton ledger scanner for authorized parties."
+    >
+    <meta name="theme-color" content="#08110f">
+    <title>Canton Scope — Private Ledger Scanner</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+    <script src="/assets/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#dashboard">Skip to scanner dashboard</a>
+
+    <div class="page-shell">
+      <header class="site-header" aria-label="Application header">
+        <a class="brand" href="/" aria-label="Canton Scope home">
+          <span class="brand-mark" aria-hidden="true">
+            <span></span>
+          </span>
+          <span class="brand-copy">
+            <strong>Canton Scope</strong>
+            <small>Private ledger index</small>
+          </span>
+        </a>
+
+        <div class="header-actions">
+          <span class="network-label">
+            <span class="network-label__key">Network</span>
+            <span>DevNet</span>
+          </span>
+          <button
+            class="admin-button"
+            id="open-admin"
+            type="button"
+            aria-haspopup="dialog"
+          >
+            <span class="admin-button__lock" aria-hidden="true"></span>
+            Admin locked
+          </button>
+        </div>
+      </header>
+
+      <main id="dashboard">
+        <section class="intro" aria-labelledby="page-title">
+          <div class="intro-copy">
+            <p class="eyebrow">Authorized view · locally indexed</p>
+            <h1 id="page-title">Private ledger.<br><span>Made visible.</span></h1>
+            <p class="intro-summary">
+              A live, resumable view of balances and transfers disclosed to
+              this scanner—never a global block explorer.
+            </p>
+          </div>
+
+          <div class="privacy-card">
+            <div class="privacy-card__topline">
+              <span class="privacy-icon" aria-hidden="true"></span>
+              <span>Privacy boundary</span>
+            </div>
+            <p>
+              Canton only reveals data for parties this authenticated user is
+              entitled to observe.
+            </p>
+            <div class="privacy-flow" aria-label="Scanner privacy flow">
+              <span>Participant</span>
+              <i aria-hidden="true"></i>
+              <span>Authorized parties</span>
+              <i aria-hidden="true"></i>
+              <span>Local index</span>
+            </div>
+          </div>
+        </section>
+
+        <div class="notice notice--error" id="error-banner" role="alert" hidden>
+          <div>
+            <strong>Scanner data is temporarily unavailable</strong>
+            <p id="error-message">The last indexed state remains visible.</p>
+          </div>
+          <button type="button" id="retry-button">Retry</button>
+        </div>
+
+        <section class="status-rail" aria-label="Scanner status" aria-busy="true">
+          <article class="status-primary">
+            <span class="status-orbit" aria-hidden="true"></span>
+            <div>
+              <p>Scanner stream</p>
+              <strong>Connecting</strong>
+            </div>
+            <span class="status-chip">Starting</span>
+          </article>
+
+          <article class="status-metric">
+            <p>Ledger offset</p>
+            <span class="skeleton skeleton--metric">Loading offset</span>
+          </article>
+          <article class="status-metric">
+            <p>Active parties</p>
+            <span class="skeleton skeleton--short">Loading count</span>
+          </article>
+          <article class="status-metric">
+            <p>Catalog</p>
+            <span class="skeleton skeleton--medium">Loading catalog</span>
+          </article>
+        </section>
+
+        <section class="workspace" aria-label="Private ledger workspace">
+          <aside class="panel party-panel" aria-labelledby="party-heading">
+            <div class="panel-heading">
+              <div>
+                <p class="panel-kicker">Authorized catalog</p>
+                <h2 id="party-heading">Parties</h2>
+              </div>
+              <span class="count-badge" aria-label="Party count loading">—</span>
+            </div>
+
+            <label class="search-field" for="party-search">
+              <span class="search-icon" aria-hidden="true"></span>
+              <span class="sr-only">Search authorized parties</span>
+              <input
+                id="party-search"
+                type="search"
+                placeholder="Search party ID"
+                autocomplete="off"
+                disabled
+              >
+              <kbd>⌘ K</kbd>
+            </label>
+
+            <div class="party-list" aria-busy="true" aria-live="polite">
+              <div class="party-placeholder">
+                <span class="party-placeholder__avatar"></span>
+                <span class="party-placeholder__lines">
+                  <i></i><i></i>
+                </span>
+              </div>
+              <div class="party-placeholder">
+                <span class="party-placeholder__avatar"></span>
+                <span class="party-placeholder__lines">
+                  <i></i><i></i>
+                </span>
+              </div>
+              <div class="party-placeholder">
+                <span class="party-placeholder__avatar"></span>
+                <span class="party-placeholder__lines">
+                  <i></i><i></i>
+                </span>
+              </div>
+              <p class="loading-label">Loading authorized parties…</p>
+            </div>
+
+            <div class="party-pagination" aria-label="Party pagination">
+              <button type="button" disabled>Previous</button>
+              <span>Page —</span>
+              <button type="button" disabled>Next</button>
+            </div>
+          </aside>
+
+          <div class="dashboard-column">
+            <section class="panel balance-panel" aria-labelledby="balance-heading">
+              <div class="panel-heading panel-heading--balance">
+                <div>
+                  <p class="panel-kicker">Current active contract set</p>
+                  <h2 id="balance-heading">Balances</h2>
+                </div>
+                <div class="focused-party" aria-label="Focused party loading">
+                  <span>Focused party</span>
+                  <strong>Waiting for catalog</strong>
+                </div>
+              </div>
+
+              <div class="balance-grid" aria-busy="true">
+                <article class="balance-card balance-card--primary">
+                  <span class="balance-card__instrument">Instrument</span>
+                  <span class="skeleton skeleton--balance">Loading balance</span>
+                  <span class="balance-card__caption">Indexed amount</span>
+                </article>
+                <article class="balance-card">
+                  <span class="balance-card__instrument">Instrument</span>
+                  <span class="skeleton skeleton--balance">Loading balance</span>
+                  <span class="balance-card__caption">Indexed amount</span>
+                </article>
+                <article class="balance-card balance-card--empty">
+                  <span class="balance-card__plus" aria-hidden="true">+</span>
+                  <span>Additional instruments</span>
+                </article>
+              </div>
+            </section>
+
+            <section class="panel activity-panel" aria-labelledby="activity-heading">
+              <div class="panel-heading">
+                <div>
+                  <p class="panel-kicker">Semantic history</p>
+                  <h2 id="activity-heading">Transfer activity</h2>
+                </div>
+                <div class="activity-legend" aria-label="Transfer direction legend">
+                  <span><i class="legend-dot legend-dot--in"></i>Received</span>
+                  <span><i class="legend-dot legend-dot--out"></i>Sent</span>
+                </div>
+              </div>
+
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">Direction</th>
+                      <th scope="col">Counterparty</th>
+                      <th scope="col">Amount</th>
+                      <th scope="col">Recorded</th>
+                      <th scope="col">Offset</th>
+                    </tr>
+                  </thead>
+                  <tbody aria-busy="true">
+                    <tr class="table-placeholder">
+                      <td><span></span></td>
+                      <td><span></span></td>
+                      <td><span></span></td>
+                      <td><span></span></td>
+                      <td><span></span></td>
+                    </tr>
+                    <tr class="table-placeholder">
+                      <td><span></span></td>
+                      <td><span></span></td>
+                      <td><span></span></td>
+                      <td><span></span></td>
+                      <td><span></span></td>
+                    </tr>
+                    <tr class="table-placeholder">
+                      <td><span></span></td>
+                      <td><span></span></td>
+                      <td><span></span></td>
+                      <td><span></span></td>
+                      <td><span></span></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <div class="activity-footer">
+                <span>Only confidently reconstructed transfers appear here.</span>
+                <div>
+                  <button type="button" disabled aria-label="Previous history page">←</button>
+                  <button type="button" disabled aria-label="Next history page">→</button>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+      </main>
+
+      <footer>
+        <p>Canton Scope <span aria-hidden="true">/</span> Private by design</p>
+        <a href="/docs">API documentation</a>
+      </footer>
+    </div>
+
+    <dialog class="admin-dialog" id="admin-dialog" aria-labelledby="admin-title">
+      <form method="dialog">
+        <button class="dialog-close" value="cancel" aria-label="Close admin dialog">×</button>
+        <p class="panel-kicker">Protected action</p>
+        <h2 id="admin-title">Unlock party selection</h2>
+        <p>
+          Selection controls will use a short-lived admin token. It will never
+          be stored in this browser.
+        </p>
+        <label for="admin-token">Admin token</label>
+        <input
+          id="admin-token"
+          type="password"
+          autocomplete="off"
+          placeholder="Available in Milestone 3"
+          disabled
+        >
+        <button class="dialog-submit" type="submit" value="cancel" disabled>
+          Unlock selection
+        </button>
+        <small>Party management is not enabled in this frontend milestone.</small>
+      </form>
+    </dialog>
+
+    <noscript>
+      <div class="noscript-message">
+        JavaScript is required to load live scanner balances and history.
+        The API remains available through <a href="/docs">its documentation</a>.
+      </div>
+    </noscript>
+  </body>
+</html>

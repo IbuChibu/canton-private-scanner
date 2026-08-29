@@ -582,6 +582,37 @@ class UpdateParsingTests(TemporaryScannerDatabase):
 
 
 class ApiTests(TemporaryScannerDatabase):
+    def test_frontend_shell_and_assets_are_served_without_hiding_api_routes(self):
+        api = importlib.import_module("api")
+        response = api.frontend()
+        index_path = Path(response.path)
+        html = index_path.read_text()
+        styles = (index_path.parent / "styles.css").read_text()
+        javascript = (index_path.parent / "app.js").read_text()
+
+        self.assertEqual(response.media_type, "text/html")
+        self.assertIn('id="dashboard"', html)
+        self.assertIn('href="/assets/styles.css"', html)
+        self.assertIn('src="/assets/app.js"', html)
+        self.assertIn('id="admin-dialog"', html)
+        self.assertIn("@media (max-width: 600px)", styles)
+        self.assertIn("prefers-reduced-motion", styles)
+        self.assertIn("showModal", javascript)
+
+        route_paths = {route.path for route in api.app.routes}
+        self.assertTrue(
+            {
+                "/",
+                "/assets",
+                "/health",
+                "/parties",
+                "/parties/selection",
+                "/balance/{party}",
+                "/history/{party}",
+                "/docs",
+            }.issubset(route_paths)
+        )
+
     def test_balance_health_and_semantic_history(self):
         database.replace_all_holdings_and_save_offset(
             {ALICE: [holding("api-holding", ALICE, "1.1")]},

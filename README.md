@@ -185,6 +185,10 @@ source .venv/bin/activate
 uvicorn api:app --reload
 ```
 
+Open `http://127.0.0.1:8000/` for the responsive scanner dashboard shell.
+Milestone 1 provides the visual interface and same-origin hosting; live browser
+data wiring follows in the next frontend milestone.
+
 Then query a full party ID or an unambiguous prefix:
 
 ```bash
