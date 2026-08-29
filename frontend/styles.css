@@ -1099,6 +1099,23 @@ h1 span {
   gap: 12px;
 }
 
+.panel-state {
+  min-height: 18px;
+  margin: -10px 0 16px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.64rem;
+  line-height: 1.45;
+}
+
+.panel-state[data-tone="error"] {
+  color: var(--danger);
+}
+
+.panel-state[data-tone="inactive"] {
+  color: var(--amber);
+}
+
 .balance-card {
   display: flex;
   min-height: 164px;
@@ -1113,6 +1130,20 @@ h1 span {
 .balance-card--primary {
   border-color: rgba(188, 241, 126, 0.17);
   background: linear-gradient(140deg, rgba(188, 241, 126, 0.08), transparent 64%);
+}
+
+.balance-card__amount {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: clamp(1.28rem, 2.3vw, 2rem);
+  font-weight: 620;
+  letter-spacing: -0.055em;
+  line-height: 1.12;
+}
+
+.balance-card__amount[data-zero="true"] {
+  color: var(--muted-bright);
 }
 
 .balance-card__instrument {
@@ -1131,6 +1162,28 @@ h1 span {
 .balance-card--empty {
   color: var(--muted);
   font-size: 0.7rem;
+}
+
+.dashboard-empty {
+  display: grid;
+  min-height: 164px;
+  padding: 26px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-md);
+  grid-column: 1 / -1;
+  place-items: center;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.012);
+  font-size: 0.76rem;
+  line-height: 1.65;
+  text-align: center;
+}
+
+.dashboard-empty strong {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--muted-bright);
+  font-size: 0.82rem;
 }
 
 .balance-card--empty {
@@ -1178,6 +1231,10 @@ h1 span {
   background: var(--cyan);
 }
 
+.legend-dot--self {
+  background: var(--amber);
+}
+
 .table-wrap {
   overflow-x: auto;
 }
@@ -1185,7 +1242,7 @@ h1 span {
 table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 700px;
+  min-width: 850px;
 }
 
 th,
@@ -1216,6 +1273,119 @@ th {
   width: 45%;
 }
 
+.transfer-row:hover {
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.transfer-direction {
+  display: inline-flex;
+  gap: 7px;
+  align-items: center;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted-bright);
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
+.transfer-direction::before {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+  content: "";
+}
+
+.transfer-direction--received {
+  border-color: rgba(188, 241, 126, 0.17);
+  color: var(--accent);
+}
+
+.transfer-direction--received::before {
+  background: var(--accent);
+}
+
+.transfer-direction--sent {
+  border-color: rgba(112, 217, 220, 0.17);
+  color: var(--cyan);
+}
+
+.transfer-direction--sent::before {
+  background: var(--cyan);
+}
+
+.transfer-direction--self {
+  border-color: rgba(240, 203, 116, 0.2);
+  color: var(--amber);
+}
+
+.transfer-direction--self::before {
+  background: var(--amber);
+}
+
+.counterparty-cell {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.counterparty-cell code,
+.transfer-amount,
+.transfer-offset {
+  color: var(--muted-bright);
+  font-family: var(--mono);
+  font-size: 0.66rem;
+}
+
+.counterparty-cell code {
+  display: inline-block;
+  overflow: hidden;
+  max-width: 190px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.copy-party {
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 0.56rem;
+  cursor: pointer;
+}
+
+.copy-party:hover {
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+
+.transfer-amount {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.transfer-instrument,
+.transfer-time {
+  color: var(--muted-bright);
+  font-size: 0.68rem;
+}
+
+.transfer-time time {
+  white-space: nowrap;
+}
+
+.history-empty-row td {
+  height: 164px;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.6;
+  text-align: center;
+}
+
 .activity-footer {
   justify-content: space-between;
   padding-top: 18px;
@@ -1225,6 +1395,25 @@ th {
 
 .activity-footer > div {
   gap: 7px;
+}
+
+.activity-footer > div > span {
+  min-width: 72px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  text-align: center;
+}
+
+.activity-footer button:not(:disabled) {
+  color: var(--muted-bright);
+  cursor: pointer;
+}
+
+.activity-footer button:not(:disabled):hover {
+  border-color: var(--line-strong);
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.04);
 }
 
 footer {

@@ -1091,18 +1091,39 @@ def get_balance_for_party(party):
     finally:
         conn.close()
 
-    totals = {}
+    amounts_by_instrument = {}
     for amount, instrument in rows:
-        totals[instrument] = totals.get(instrument, Decimal("0")) + Decimal(amount)
+        amounts_by_instrument.setdefault(instrument, []).append(Decimal(amount))
+
+    totals = {}
+    for instrument, amounts in amounts_by_instrument.items():
+        if any(not value.is_finite() for value in amounts):
+            raise ValueError("Holding amount must be a finite Decimal")
+        minimum_exponent = min(value.as_tuple().exponent for value in amounts)
+        coefficient_total = 0
+        for value in amounts:
+            decimal_tuple = value.as_tuple()
+            coefficient = int("".join(map(str, decimal_tuple.digits)) or "0")
+            if decimal_tuple.sign:
+                coefficient = -coefficient
+            coefficient_total += coefficient * 10 ** (
+                decimal_tuple.exponent - minimum_exponent
+            )
+
+        sign = int(coefficient_total < 0)
+        digits = tuple(map(int, str(abs(coefficient_total)))) or (0,)
+        totals[instrument] = Decimal((sign, digits, minimum_exponent))
     return [
         {"instrument": instrument, "amount": str(totals[instrument])}
         for instrument in sorted(totals, key=lambda value: value or "")
     ]
 
 
-def get_transfers_for_party(party, limit=100):
+def get_transfers_for_party(party, limit=100, offset=0):
     """Return semantic transfers in which the party is sender or receiver."""
 
+    limit = max(1, int(limit))
+    offset = max(0, int(offset))
     conn = get_connection()
     try:
         rows = conn.execute(
@@ -1112,9 +1133,9 @@ def get_transfers_for_party(party, limit=100):
             FROM transfers
             WHERE sender = ? OR receiver = ?
             ORDER BY offset DESC, event_id DESC
-            LIMIT ?
+            LIMIT ? OFFSET ?
             """,
-            (party, party, int(limit)),
+            (party, party, limit, offset),
         ).fetchall()
     finally:
         conn.close()
@@ -1123,6 +1144,19 @@ def get_transfers_for_party(party, limit=100):
         "amount", "instrument", "choice",
     )
     return [dict(zip(keys, row)) for row in rows]
+
+
+def count_transfers_for_party(party):
+    """Count semantic transfers in which the party is sender or receiver."""
+
+    conn = get_connection()
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) FROM transfers WHERE sender = ? OR receiver = ?",
+            (party, party),
+        ).fetchone()[0]
+    finally:
+        conn.close()
 
 
 def get_recent_private_events(limit=100):

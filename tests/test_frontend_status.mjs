@@ -51,10 +51,20 @@ class MockElement {
   }
 
   append(...children) {
+    for (const child of children) {
+      if (child && typeof child === "object") {
+        child.parentElement = this;
+      }
+    }
     this.children.push(...children);
   }
 
   replaceChildren(...children) {
+    for (const child of children) {
+      if (child && typeof child === "object") {
+        child.parentElement = this;
+      }
+    }
     this.children = [...children];
   }
 
@@ -72,7 +82,7 @@ class MockElement {
 }
 
 
-function createHarness(fetchImplementation) {
+function createHarness(fetchImplementation, options = {}) {
   const selectors = [
     "#scanner-status",
     "#status-primary",
@@ -109,6 +119,15 @@ function createHarness(fetchImplementation) {
     "#reset-selection",
     "#save-selection",
     "#focused-party",
+    "#balance-state",
+    "#balance-grid",
+    "#history-state",
+    "#history-table-wrap",
+    "#history-body",
+    "#history-summary",
+    "#history-previous",
+    "#history-next",
+    "#history-page-status",
   ];
   const elements = new Map(selectors.map((selector) => [selector, new MockElement()]));
   const documentListeners = new Map();
@@ -127,7 +146,7 @@ function createHarness(fetchImplementation) {
     setTimeout: () => ++timerId,
     clearTimeout: () => {},
     addEventListener: (name, callback) => windowListeners.set(name, callback),
-    location: { href: "http://scanner.test/" },
+    location: { href: options.href ?? "http://scanner.test/" },
     history: { replaceState: () => {} },
   };
 
@@ -147,7 +166,7 @@ function createHarness(fetchImplementation) {
     URLSearchParams,
     document,
     fetch: fetchImplementation,
-    navigator: { onLine: true },
+    navigator: { onLine: true, clipboard: options.clipboard },
     window,
   });
   vm.runInContext(source, context);
@@ -261,6 +280,19 @@ test("party explorer preserves a full draft and submits with an in-memory token"
         max_parties: 50,
         selection_management_enabled: true,
       };
+    } else if (String(path).startsWith("/balance/")) {
+      payload = { party: alice, balances: [], last_offset: 10, active: true };
+    } else if (String(path).startsWith("/history/")) {
+      payload = {
+        party: alice,
+        transfers: [],
+        count: 0,
+        total: 0,
+        limit: 20,
+        offset: 0,
+        last_offset: 10,
+        active: true,
+      };
     } else {
       payload = {
         items: [
@@ -323,4 +355,229 @@ test("party explorer preserves a full draft and submits with an in-memory token"
   assert.ok(putRequest);
   assert.equal(putRequest.options.headers.Authorization, "Bearer tab-only-token");
   assert.deepEqual(JSON.parse(putRequest.options.body).parties, [alice, bob]);
+});
+
+
+test("focused dashboard preserves exact decimals and renders every transfer direction", async () => {
+  const alice = "alice::1220alice";
+  const bob = "bob::1220bob";
+  const carol = "carol::1220carol";
+  const exactAmount = "12345678901234567890.123456789012345678";
+  const copied = [];
+  const requests = [];
+  const harness = createHarness(async (path) => {
+    const route = String(path);
+    requests.push(route);
+    let payload;
+    if (route === "/health") {
+      payload = {
+        status: "ok",
+        last_offset: 44,
+        catalog: { complete: true, readable_count: 3 },
+        active_party_count: 1,
+        desired_party_count: 1,
+        restart_required: false,
+      };
+    } else if (route === "/parties/selection") {
+      payload = {
+        desired_parties: [alice],
+        active_parties: [alice],
+        max_parties: 50,
+        selection_management_enabled: false,
+      };
+    } else if (route.startsWith("/parties?")) {
+      payload = {
+        items: [{ party: alice, display_name: "alice", readable: true, active: true }],
+        total: 1,
+        limit: 50,
+        offset: 0,
+      };
+    } else if (route.startsWith("/balance/")) {
+      payload = {
+        party: alice,
+        balances: [{ instrument: "Amulet", amount: exactAmount }],
+        last_offset: 44,
+        active: true,
+      };
+    } else if (route.includes("offset=20")) {
+      payload = {
+        party: alice,
+        transfers: [{
+          direction: "received",
+          counterparty: carol,
+          amount: "1.000000000000000001",
+          instrument: "Amulet",
+          record_time: "2026-08-29T17:30:00Z",
+          offset: 40,
+        }],
+        count: 1,
+        total: 21,
+        limit: 20,
+        offset: 20,
+        last_offset: 44,
+        active: true,
+      };
+    } else {
+      payload = {
+        party: alice,
+        transfers: [
+          {
+            direction: "sent",
+            counterparty: bob,
+            amount: "10.000000000000000001",
+            instrument: "Amulet",
+            record_time: "2026-08-29T18:00:00Z",
+            offset: 44,
+          },
+          {
+            direction: "received",
+            counterparty: carol,
+            amount: "2.5",
+            instrument: "USD",
+            record_time: "2026-08-29T17:59:00Z",
+            offset: 43,
+          },
+          {
+            direction: "self",
+            counterparty: alice,
+            amount: "0.000000000000000001",
+            instrument: "Amulet",
+            record_time: "2026-08-29T17:58:00Z",
+            offset: 42,
+          },
+        ],
+        count: 3,
+        total: 21,
+        limit: 20,
+        offset: 0,
+        last_offset: 44,
+        active: true,
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => "application/json" },
+      json: async () => payload,
+    };
+  }, {
+    clipboard: { writeText: async (value) => copied.push(value) },
+  });
+
+  await settle();
+  await settle();
+
+  const balanceCard = harness.elements.get("#balance-grid").children[0];
+  assert.equal(balanceCard.children[1].textContent, exactAmount);
+  assert.equal(balanceCard.children[1].title, exactAmount);
+
+  const historyRows = harness.elements.get("#history-body").children;
+  assert.equal(historyRows.length, 3);
+  assert.equal(historyRows[0].children[0].children[0].textContent, "sent");
+  assert.equal(historyRows[1].children[0].children[0].textContent, "received");
+  assert.equal(historyRows[2].children[0].children[0].textContent, "Self");
+  assert.equal(historyRows[0].children[2].textContent, "10.000000000000000001");
+
+  const copyButton = historyRows[0].children[1].children[0].children[1];
+  await copyButton.listeners.get("click")();
+  assert.deepEqual(copied, [bob]);
+  assert.equal(copyButton.textContent, "Copied");
+
+  assert.equal(harness.elements.get("#history-next").disabled, false);
+  harness.elements.get("#history-next").listeners.get("click")();
+  await settle();
+  assert.ok(requests.some((route) => route.includes("offset=20")));
+  assert.equal(harness.elements.get("#history-page-status").textContent, "Page 2 of 2");
+});
+
+
+test("inactive focused parties retain history without requesting a balance", async () => {
+  const alice = "alice::1220alice";
+  const bob = "bob::1220bob";
+  const requests = [];
+  const harness = createHarness(async (path) => {
+    const route = String(path);
+    requests.push(route);
+    let payload;
+    if (route === "/health") {
+      payload = {
+        status: "ok",
+        last_offset: 50,
+        catalog: { complete: true, readable_count: 2 },
+        active_party_count: 1,
+        desired_party_count: 1,
+        restart_required: false,
+      };
+    } else if (route === "/parties/selection") {
+      payload = {
+        desired_parties: [alice],
+        active_parties: [alice],
+        max_parties: 50,
+        selection_management_enabled: false,
+      };
+    } else if (route.startsWith("/parties?")) {
+      payload = {
+        items: [
+          { party: alice, display_name: "alice", readable: true, active: true },
+          { party: bob, display_name: "bob", readable: true, active: false },
+        ],
+        total: 2,
+        limit: 50,
+        offset: 0,
+      };
+    } else if (route.startsWith("/balance/")) {
+      payload = { party: alice, balances: [], last_offset: 50, active: true };
+    } else {
+      const inactive = route.includes(encodeURIComponent(bob));
+      payload = {
+        party: inactive ? bob : alice,
+        transfers: inactive ? [{
+          direction: "received",
+          counterparty: alice,
+          amount: "7.25",
+          instrument: "Amulet",
+          record_time: "2026-08-29T18:30:00Z",
+          offset: 49,
+        }] : [],
+        count: inactive ? 1 : 0,
+        total: inactive ? 1 : 0,
+        limit: 20,
+        offset: 0,
+        last_offset: 50,
+        active: !inactive,
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => "application/json" },
+      json: async () => payload,
+    };
+  });
+
+  await settle();
+  await settle();
+  const requestCountBeforeFocus = requests.length;
+  const bobRow = harness.elements.get("#party-list").children[1];
+  bobRow.children[1].listeners.get("click")();
+  await settle();
+
+  const focusedRequests = requests.slice(requestCountBeforeFocus);
+  assert.equal(
+    focusedRequests.some((route) => route.startsWith(`/balance/${encodeURIComponent(bob)}`)),
+    false,
+  );
+  assert.equal(
+    focusedRequests.some((route) => route.startsWith(`/history/${encodeURIComponent(bob)}`)),
+    true,
+  );
+  assert.equal(
+    harness.elements.get("#balance-grid").children[0].children[0].children[0].textContent,
+    "No current balance available",
+  );
+  assert.equal(harness.elements.get("#history-body").children.length, 1);
+  assert.equal(
+    harness.elements.get("#history-state").textContent.includes("indexing inactive"),
+    true,
+  );
 });

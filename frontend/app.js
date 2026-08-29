@@ -2,6 +2,7 @@
   "use strict";
 
   const HEALTH_POLL_MS = 5_000;
+  const DASHBOARD_POLL_MS = 10_000;
   const REQUEST_TIMEOUT_MS = 8_000;
   const STALE_HEARTBEAT_MS = 15_000;
 
@@ -57,6 +58,15 @@
     resetSelection: document.querySelector("#reset-selection"),
     saveSelection: document.querySelector("#save-selection"),
     focusedParty: document.querySelector("#focused-party"),
+    balanceState: document.querySelector("#balance-state"),
+    balanceGrid: document.querySelector("#balance-grid"),
+    historyState: document.querySelector("#history-state"),
+    historyTableWrap: document.querySelector("#history-table-wrap"),
+    historyBody: document.querySelector("#history-body"),
+    historySummary: document.querySelector("#history-summary"),
+    historyPrevious: document.querySelector("#history-previous"),
+    historyNext: document.querySelector("#history-next"),
+    historyPageStatus: document.querySelector("#history-page-status"),
   };
 
   const state = {
@@ -81,6 +91,15 @@
     adminToken: null,
     adminUnlocked: false,
     selectionSaving: false,
+    dashboardPollTimer: null,
+    balance: null,
+    balanceController: null,
+    balanceRequestVersion: 0,
+    history: null,
+    historyLimit: 20,
+    historyOffset: 0,
+    historyController: null,
+    historyRequestVersion: 0,
   };
 
   document.documentElement.dataset.js = "ready";
@@ -407,10 +426,22 @@
       if (requestVersion !== state.healthRequestVersion) {
         return;
       }
+      const previousOffset = state.health?.last_offset;
+      const offsetAdvanced = (
+        previousOffset !== null
+        && previousOffset !== undefined
+        && health.last_offset !== null
+        && health.last_offset !== undefined
+        && String(previousOffset) !== String(health.last_offset)
+      );
       state.health = health;
       state.lastSuccessfulAt = new Date();
       renderHealth(health);
       hideError();
+      if (offsetAdvanced) {
+        state.historyOffset = 0;
+        refreshFocusedData({ force: true });
+      }
     } catch (error) {
       if (controller.signal.aborted || requestVersion !== state.healthRequestVersion) {
         return;
@@ -549,9 +580,15 @@
   }
 
   function setFocusedParty(party, { updateUrl = true } = {}) {
-    state.focusedParty = party || null;
+    const nextParty = party || null;
+    const changed = nextParty !== state.focusedParty;
+    state.focusedParty = nextParty;
     elements.focusedParty.textContent = abbreviatedParty(state.focusedParty);
     elements.focusedParty.title = state.focusedParty ?? "";
+    elements.focusedParty.parentElement?.setAttribute(
+      "aria-label",
+      state.focusedParty ? `Focused party ${state.focusedParty}` : "No focused party",
+    );
 
     if (updateUrl && window.history && window.location) {
       const url = new URL(window.location.href);
@@ -563,6 +600,12 @@
       window.history.replaceState({}, "", url);
     }
     renderPartyList();
+    if (changed) {
+      state.balance = null;
+      state.history = null;
+      state.historyOffset = 0;
+      refreshFocusedData({ force: true });
+    }
   }
 
   function createElement(tag, className = "", text = "") {
@@ -574,6 +617,443 @@
       element.textContent = text;
     }
     return element;
+  }
+
+  function setPanelState(element, message, tone = "") {
+    element.textContent = message;
+    if (tone) {
+      element.dataset.tone = tone;
+    } else {
+      delete element.dataset.tone;
+    }
+  }
+
+  function createDashboardEmpty(title, message) {
+    const empty = createElement("div", "dashboard-empty");
+    const copy = createElement("div");
+    copy.append(
+      createElement("strong", "", title),
+      createElement("span", "", message),
+    );
+    empty.append(copy);
+    return empty;
+  }
+
+  function decimalIsZero(value) {
+    const [coefficient] = String(value ?? "").trim().replace(/^[+-]/, "").split(/[eE]/, 1);
+    const digits = coefficient.replace(".", "");
+    return /^0+$/.test(digits);
+  }
+
+  function renderBalanceLoading() {
+    elements.balanceGrid.replaceChildren();
+    for (let index = 0; index < 2; index += 1) {
+      const card = createElement(
+        "article",
+        `balance-card${index === 0 ? " balance-card--primary" : ""}`,
+      );
+      card.append(
+        createElement("span", "balance-card__instrument", "Instrument"),
+        createElement("span", "skeleton skeleton--balance", "Loading balance"),
+        createElement("span", "balance-card__caption", "Indexed amount"),
+      );
+      elements.balanceGrid.append(card);
+    }
+    elements.balanceGrid.setAttribute("aria-busy", "true");
+    setPanelState(elements.balanceState, "Loading current balances…");
+  }
+
+  function renderBalanceEmpty(title, message, tone = "") {
+    elements.balanceGrid.replaceChildren(createDashboardEmpty(title, message));
+    elements.balanceGrid.setAttribute("aria-busy", "false");
+    setPanelState(elements.balanceState, message, tone);
+  }
+
+  function renderBalanceInactive() {
+    renderBalanceEmpty(
+      "No current balance available",
+      "This party is not actively indexed. Its retained transfer history remains available below.",
+      "inactive",
+    );
+  }
+
+  function renderBalance(response) {
+    elements.balanceGrid.replaceChildren();
+    if (!response.balances.length) {
+      renderBalanceEmpty(
+        "Zero active holdings",
+        "The active contract set contains no current Holding balances for this party.",
+      );
+      return;
+    }
+
+    response.balances.forEach((balance, index) => {
+      const instrument = balance.instrument || "Unspecified instrument";
+      const amount = String(balance.amount);
+      const card = createElement(
+        "article",
+        `balance-card${index === 0 ? " balance-card--primary" : ""}`,
+      );
+      const instrumentElement = createElement(
+        "span",
+        "balance-card__instrument",
+        instrument,
+      );
+      instrumentElement.title = instrument;
+      const amountElement = createElement("strong", "balance-card__amount", amount);
+      amountElement.dataset.zero = String(decimalIsZero(amount));
+      amountElement.title = amount;
+      card.append(
+        instrumentElement,
+        amountElement,
+        createElement(
+          "span",
+          "balance-card__caption",
+          decimalIsZero(amount)
+            ? "Indexed total · explicit zero"
+            : `Indexed at offset ${formatInteger(response.last_offset)}`,
+        ),
+      );
+      elements.balanceGrid.append(card);
+    });
+    elements.balanceGrid.setAttribute("aria-busy", "false");
+    setPanelState(
+      elements.balanceState,
+      `${formatInteger(response.balances.length)} instrument${response.balances.length === 1 ? "" : "s"} · checkpoint ${formatInteger(response.last_offset)}`,
+    );
+  }
+
+  function renderHistoryLoading() {
+    elements.historyBody.replaceChildren();
+    for (let rowIndex = 0; rowIndex < 3; rowIndex += 1) {
+      const row = createElement("tr", "table-placeholder");
+      for (let columnIndex = 0; columnIndex < 6; columnIndex += 1) {
+        const cell = createElement("td");
+        cell.append(createElement("span"));
+        row.append(cell);
+      }
+      elements.historyBody.append(row);
+    }
+    elements.historyBody.setAttribute("aria-busy", "true");
+    elements.historyPrevious.disabled = true;
+    elements.historyNext.disabled = true;
+    elements.historyPageStatus.textContent = "Page —";
+    setPanelState(elements.historyState, "Loading transfer activity…");
+  }
+
+  function renderHistoryEmpty(title, message, tone = "") {
+    const row = createElement("tr", "history-empty-row");
+    const cell = createElement("td");
+    cell.colSpan = 6;
+    const copy = createElement("div");
+    copy.append(
+      createElement("strong", "", title),
+      createElement("span", "", ` ${message}`),
+    );
+    cell.append(copy);
+    row.append(cell);
+    elements.historyBody.replaceChildren(row);
+    elements.historyBody.setAttribute("aria-busy", "false");
+    elements.historyPrevious.disabled = true;
+    elements.historyNext.disabled = true;
+    elements.historyPageStatus.textContent = "Page 1 of 1";
+    elements.historySummary.textContent = "Only confidently reconstructed transfers appear here.";
+    setPanelState(elements.historyState, message, tone);
+  }
+
+  function formatRecordTime(value) {
+    if (!value) {
+      return "Not recorded";
+    }
+    const timestamp = new Date(value);
+    if (Number.isNaN(timestamp.getTime())) {
+      return String(value);
+    }
+    return new Intl.DateTimeFormat(undefined, {
+      dateStyle: "medium",
+      timeStyle: "short",
+    }).format(timestamp);
+  }
+
+  async function copyParty(button, party) {
+    try {
+      if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {
+        throw new Error("Clipboard unavailable");
+      }
+      await navigator.clipboard.writeText(party);
+      button.textContent = "Copied";
+      button.setAttribute("aria-label", `Copied full party ID ${party}`);
+      window.setTimeout(() => {
+        button.textContent = "Copy";
+        button.setAttribute("aria-label", `Copy full party ID ${party}`);
+      }, 1_500);
+    } catch (_error) {
+      button.textContent = "Unavailable";
+      button.setAttribute("aria-label", `Unable to copy full party ID ${party}`);
+    }
+  }
+
+  function createTransferRow(transfer) {
+    const direction = ["sent", "received", "self"].includes(transfer.direction)
+      ? transfer.direction
+      : "self";
+    const row = createElement("tr", "transfer-row");
+
+    const directionCell = createElement("td");
+    directionCell.append(
+      createElement(
+        "span",
+        `transfer-direction transfer-direction--${direction}`,
+        direction === "self" ? "Self" : direction,
+      ),
+    );
+
+    const counterparty = transfer.counterparty || "Unknown party";
+    const counterpartyCell = createElement("td");
+    const counterpartyWrap = createElement("div", "counterparty-cell");
+    const counterpartyId = createElement("code", "", compactPartyId(counterparty));
+    counterpartyId.title = counterparty;
+    const copyButton = createElement("button", "copy-party", "Copy");
+    copyButton.type = "button";
+    copyButton.title = counterparty;
+    copyButton.setAttribute("aria-label", `Copy full party ID ${counterparty}`);
+    copyButton.addEventListener("click", () => copyParty(copyButton, counterparty));
+    counterpartyWrap.append(counterpartyId, copyButton);
+    counterpartyCell.append(counterpartyWrap);
+
+    const amount = String(transfer.amount);
+    const amountCell = createElement("td", "transfer-amount", amount);
+    amountCell.title = amount;
+    const instrumentCell = createElement(
+      "td",
+      "transfer-instrument",
+      transfer.instrument || "Unspecified",
+    );
+    const timeCell = createElement("td", "transfer-time");
+    const time = createElement("time", "", formatRecordTime(transfer.record_time));
+    if (transfer.record_time) {
+      time.dateTime = transfer.record_time;
+      time.title = transfer.record_time;
+    }
+    timeCell.append(time);
+    const offsetCell = createElement("td", "transfer-offset", formatInteger(transfer.offset));
+    offsetCell.title = String(transfer.offset ?? "");
+
+    row.append(
+      directionCell,
+      counterpartyCell,
+      amountCell,
+      instrumentCell,
+      timeCell,
+      offsetCell,
+    );
+    return row;
+  }
+
+  function renderHistory(response) {
+    elements.historyBody.replaceChildren();
+    if (!response.transfers.length) {
+      renderHistoryEmpty(
+        "No semantic transfers",
+        "No confidently reconstructed transfers are stored for this party.",
+        response.active ? "" : "inactive",
+      );
+      return;
+    }
+
+    for (const transfer of response.transfers) {
+      elements.historyBody.append(createTransferRow(transfer));
+    }
+    elements.historyBody.setAttribute("aria-busy", "false");
+
+    const limit = Number(response.limit) || state.historyLimit;
+    const offset = Number(response.offset) || 0;
+    const total = Number(response.total) || 0;
+    const page = Math.floor(offset / limit) + 1;
+    const pageCount = Math.max(1, Math.ceil(total / limit));
+    const first = total ? offset + 1 : 0;
+    const last = Math.min(offset + response.transfers.length, total);
+    elements.historyPrevious.disabled = offset === 0;
+    elements.historyNext.disabled = offset + limit >= total;
+    elements.historyPageStatus.textContent = `Page ${page} of ${pageCount}`;
+    elements.historySummary.textContent = `Showing ${formatInteger(first)}–${formatInteger(last)} of ${formatInteger(total)} transfers`;
+    setPanelState(
+      elements.historyState,
+      response.active
+        ? `Current activity · checkpoint ${formatInteger(response.last_offset)}`
+        : `Historical activity retained · indexing inactive · checkpoint ${formatInteger(response.last_offset)}`,
+      response.active ? "" : "inactive",
+    );
+  }
+
+  async function loadBalance({ force = false } = {}) {
+    const party = state.focusedParty;
+    const active = party && state.activeParties.has(party);
+    if (state.balanceController) {
+      if (!force) {
+        return;
+      }
+      state.balanceController.abort();
+    }
+    if (!party) {
+      renderBalanceEmpty(
+        "Choose a party",
+        "Focus an authorized party to inspect its current balances.",
+      );
+      return;
+    }
+    if (!active) {
+      renderBalanceInactive();
+      return;
+    }
+
+    if (!state.balance || state.balance.party !== party) {
+      renderBalanceLoading();
+    } else {
+      setPanelState(elements.balanceState, "Refreshing current balances…");
+    }
+    const controller = new AbortController();
+    const requestVersion = ++state.balanceRequestVersion;
+    state.balanceController = controller;
+    try {
+      const response = await requestJson(`/balance/${encodeURIComponent(party)}`, {
+        signal: controller.signal,
+      });
+      if (!response || !Array.isArray(response.balances)) {
+        throw new Error("Invalid balance response");
+      }
+      if (requestVersion !== state.balanceRequestVersion || party !== state.focusedParty) {
+        return;
+      }
+      state.balance = response;
+      renderBalance(response);
+    } catch (error) {
+      if (controller.signal.aborted || requestVersion !== state.balanceRequestVersion) {
+        return;
+      }
+      if (error instanceof ApiError && error.status === 409) {
+        state.activeParties.delete(party);
+        renderBalanceInactive();
+        renderPartyList();
+        return;
+      }
+      if (!state.balance || state.balance.party !== party) {
+        renderBalanceEmpty(
+          "Balance unavailable",
+          "The current balance could not be loaded. Retry in a moment.",
+          "error",
+        );
+      } else {
+        setPanelState(
+          elements.balanceState,
+          "Balance refresh failed; the last indexed value remains visible.",
+          "error",
+        );
+      }
+      showError(error);
+    } finally {
+      if (requestVersion === state.balanceRequestVersion) {
+        state.balanceController = null;
+      }
+    }
+  }
+
+  async function loadHistory({ force = false } = {}) {
+    const party = state.focusedParty;
+    if (state.historyController) {
+      if (!force) {
+        return;
+      }
+      state.historyController.abort();
+    }
+    if (!party) {
+      renderHistoryEmpty(
+        "Choose a party",
+        "Focus an authorized party to inspect retained transfer activity.",
+      );
+      return;
+    }
+
+    const requestedOffset = state.historyOffset;
+    if (
+      !state.history
+      || state.history.party !== party
+      || Number(state.history.offset) !== requestedOffset
+    ) {
+      renderHistoryLoading();
+    } else {
+      setPanelState(elements.historyState, "Refreshing transfer activity…");
+    }
+    const controller = new AbortController();
+    const requestVersion = ++state.historyRequestVersion;
+    state.historyController = controller;
+    const parameters = new URLSearchParams({
+      limit: String(state.historyLimit),
+      offset: String(requestedOffset),
+    });
+    try {
+      const response = await requestJson(
+        `/history/${encodeURIComponent(party)}?${parameters}`,
+        { signal: controller.signal },
+      );
+      if (!response || !Array.isArray(response.transfers)) {
+        throw new Error("Invalid history response");
+      }
+      if (requestVersion !== state.historyRequestVersion || party !== state.focusedParty) {
+        return;
+      }
+      state.history = response;
+      state.historyOffset = Number(response.offset) || requestedOffset;
+      renderHistory(response);
+    } catch (error) {
+      if (controller.signal.aborted || requestVersion !== state.historyRequestVersion) {
+        return;
+      }
+      if (!state.history || state.history.party !== party) {
+        renderHistoryEmpty(
+          "History unavailable",
+          "Transfer activity could not be loaded. Retry in a moment.",
+          "error",
+        );
+      } else {
+        setPanelState(
+          elements.historyState,
+          "History refresh failed; the last indexed page remains visible.",
+          "error",
+        );
+      }
+      showError(error);
+    } finally {
+      if (requestVersion === state.historyRequestVersion) {
+        state.historyController = null;
+      }
+    }
+  }
+
+  async function refreshFocusedData({ force = false, refreshHistory = true } = {}) {
+    const requests = [loadBalance({ force })];
+    if (refreshHistory) {
+      requests.push(loadHistory({ force }));
+    }
+    await Promise.allSettled(requests);
+  }
+
+  function clearDashboardPoll() {
+    if (state.dashboardPollTimer !== null) {
+      window.clearTimeout(state.dashboardPollTimer);
+      state.dashboardPollTimer = null;
+    }
+  }
+
+  function scheduleDashboardPoll() {
+    clearDashboardPoll();
+    if (document.visibilityState === "hidden") {
+      return;
+    }
+    state.dashboardPollTimer = window.setTimeout(async () => {
+      await refreshFocusedData({ refreshHistory: state.historyOffset === 0 });
+      scheduleDashboardPoll();
+    }, DASHBOARD_POLL_MS);
   }
 
   function createPartyBadge(text, modifier = "") {
@@ -886,6 +1366,20 @@
     });
   }
 
+  function setupDashboard() {
+    elements.historyPrevious.addEventListener("click", () => {
+      state.historyOffset = Math.max(0, state.historyOffset - state.historyLimit);
+      loadHistory({ force: true });
+    });
+    elements.historyNext.addEventListener("click", () => {
+      const total = Number(state.history?.total) || 0;
+      if (state.historyOffset + state.historyLimit < total) {
+        state.historyOffset += state.historyLimit;
+        loadHistory({ force: true });
+      }
+    });
+  }
+
   function setupAdminDialog() {
     elements.openAdminButton.addEventListener("click", openAdminDialog);
     elements.closeAdminButton.addEventListener("click", closeAdminDialog);
@@ -920,30 +1414,55 @@
     elements.partySearch.disabled = true;
     await loadSelection();
     await loadParties();
+    await refreshFocusedData({ force: true });
+    scheduleDashboardPoll();
   }
 
-  elements.retryButton.addEventListener("click", () => refreshHealth({ force: true }));
+  elements.retryButton.addEventListener("click", () => {
+    refreshHealth({ force: true });
+    refreshFocusedData({ force: true });
+  });
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") {
       clearPollTimer();
+      clearDashboardPoll();
       if (state.healthController) {
         state.healthController.abort();
+      }
+      if (state.balanceController) {
+        state.balanceController.abort();
+      }
+      if (state.historyController) {
+        state.historyController.abort();
       }
       return;
     }
     refreshHealth({ force: true });
+    refreshFocusedData({ force: true });
+    scheduleDashboardPoll();
   });
-  window.addEventListener("online", () => refreshHealth({ force: true }));
+  window.addEventListener("online", () => {
+    refreshHealth({ force: true });
+    refreshFocusedData({ force: true });
+  });
   window.addEventListener("offline", () => renderHealthFailure(new Error("offline")));
   window.addEventListener("beforeunload", () => {
     clearPollTimer();
+    clearDashboardPoll();
     if (state.healthController) {
       state.healthController.abort();
+    }
+    if (state.balanceController) {
+      state.balanceController.abort();
+    }
+    if (state.historyController) {
+      state.historyController.abort();
     }
   });
 
   setupAdminDialog();
   setupPartyExplorer();
+  setupDashboard();
   refreshHealth();
   initializePartyExplorer();
 })();

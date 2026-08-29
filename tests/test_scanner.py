@@ -232,6 +232,29 @@ class DatabaseTests(TemporaryScannerDatabase):
             database.get_balance_for_party(ALICE),
             [{"instrument": "Amulet", "amount": "0.3"}],
         )
+
+        database.replace_all_holdings_and_save_offset(
+            {
+                ALICE: [
+                    holding(
+                        "decimal-large",
+                        ALICE,
+                        "12345678901234567890.123456789012345678",
+                    ),
+                    holding("decimal-tiny", ALICE, "0.000000000000000001"),
+                ]
+            },
+            41,
+        )
+        self.assertEqual(
+            database.get_balance_for_party(ALICE),
+            [
+                {
+                    "instrument": "Amulet",
+                    "amount": "12345678901234567890.123456789012345679",
+                }
+            ],
+        )
         self.assertEqual(database.resolve_party(ALICE.split("::")[0]), ALICE)
 
     def test_public_scan_schema_is_removed(self):
@@ -656,6 +679,52 @@ class ApiTests(TemporaryScannerDatabase):
         received = api.history(BOB, limit=10)["transfers"][0]
         self.assertEqual(received["direction"], "received")
         self.assertEqual(received["counterparty"], ALICE)
+
+    def test_semantic_history_pagination_and_total_preserve_perspective(self):
+        transfers = [
+            (701, "sent", ALICE, BOB, "1.000000000000000001"),
+            (702, "received", BOB, ALICE, "2.5"),
+            (703, "self", ALICE, ALICE, "0.000000000000000001"),
+        ]
+        for offset, label, sender, receiver, amount in transfers:
+            database.apply_holding_changes(
+                [],
+                [],
+                offset,
+                f"history-{label}",
+                record_time=f"2026-08-29T18:0{offset - 701}:00Z",
+                transfers=[
+                    {
+                        "event_id": f"event-{label}",
+                        "sender": sender,
+                        "receiver": receiver,
+                        "amount": amount,
+                        "instrument": "Amulet",
+                        "choice": "TransferFactory_Transfer",
+                    }
+                ],
+            )
+
+        api = importlib.import_module("api")
+        first_page = api.history(ALICE, limit=2, offset=0)
+        self.assertEqual(first_page["count"], 2)
+        self.assertEqual(first_page["total"], 3)
+        self.assertEqual(first_page["limit"], 2)
+        self.assertEqual(first_page["offset"], 0)
+        self.assertEqual(
+            [transfer["direction"] for transfer in first_page["transfers"]],
+            ["self", "received"],
+        )
+
+        second_page = api.history(ALICE, limit=2, offset=2)
+        self.assertEqual(second_page["count"], 1)
+        self.assertEqual(second_page["total"], 3)
+        self.assertEqual(second_page["offset"], 2)
+        self.assertEqual(second_page["transfers"][0]["direction"], "sent")
+        self.assertEqual(
+            second_page["transfers"][0]["amount"],
+            "1.000000000000000001",
+        )
 
     def test_cached_party_api_and_persisted_selection(self):
         database.replace_party_catalog(

@@ -136,6 +136,8 @@ row badges.
 
 ### Milestone 4 — Balances and transfer activity
 
+**Status: complete.**
+
 - Load balances only for the focused actively indexed party and format Decimal
   strings without converting them through floating-point arithmetic.
 - Display one balance card per instrument, with explicit zero/empty and inactive

@@ -192,8 +192,10 @@ uvicorn api:app --reload
 Open `http://127.0.0.1:8000/` for the responsive scanner dashboard shell.
 The status rail polls the local health API, pauses in background tabs, keeps the
 last good state during transient failures, and supports the richer hosted-worker
-heartbeat planned for deployment. Party browsing, balances, and transfer-table
-data are connected in later frontend milestones.
+heartbeat planned for deployment. The party explorer drives a focused balance
+and transfer view: active parties show exact Decimal balances, inactive parties
+retain semantic history, and the first history page refreshes when the saved
+ledger offset advances.
 
 Then query a full party ID or an unambiguous prefix:
 
@@ -212,8 +214,9 @@ Endpoints:
 - `PUT /parties/selection` — persist a validated desired set of full party IDs;
   requires the configured scanner admin bearer token.
 - `GET /balance/{party}` — current Decimal-aggregated balances.
-- `GET /history/{party}` — semantic transfers with `sent`, `received`, or
-  `self` direction and counterparty, including current indexing status.
+- `GET /history/{party}?limit=100&offset=0` — paginated semantic transfers with
+  `sent`, `received`, or `self` direction and counterparty, total count, and
+  current indexing status.
 - `GET /debug/holding-history/{party}` — low-level Holding effects.
 - `GET /docs` — generated interactive API documentation.
 
@@ -232,7 +235,8 @@ Coverage includes authenticated-user resolution, rights parsing, paged
 local-only discovery, atomic cache replacement, legacy database migration,
 selection validation and revisions, exact-offset reconciliation and rollback,
 active-only update filters, Holding create/archive, semantic history, replay,
-Decimal balances, crash consistency, and restart request construction.
+Decimal balances, history pagination and direction, inactive-party history,
+crash consistency, and restart request construction.
 
 ## Known limitations
 

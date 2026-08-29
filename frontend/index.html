@@ -222,7 +222,10 @@
                 </div>
               </div>
 
-              <div class="balance-grid" aria-busy="true">
+              <p class="panel-state" id="balance-state" aria-live="polite">
+                Loading current balances…
+              </p>
+              <div class="balance-grid" id="balance-grid" aria-busy="true">
                 <article class="balance-card balance-card--primary">
                   <span class="balance-card__instrument">Instrument</span>
                   <span class="skeleton skeleton--balance">Loading balance</span>
@@ -249,22 +252,28 @@
                 <div class="activity-legend" aria-label="Transfer direction legend">
                   <span><i class="legend-dot legend-dot--in"></i>Received</span>
                   <span><i class="legend-dot legend-dot--out"></i>Sent</span>
+                  <span><i class="legend-dot legend-dot--self"></i>Self</span>
                 </div>
               </div>
 
-              <div class="table-wrap">
+              <p class="panel-state" id="history-state" aria-live="polite">
+                Loading transfer activity…
+              </p>
+              <div class="table-wrap" id="history-table-wrap">
                 <table>
                   <thead>
                     <tr>
                       <th scope="col">Direction</th>
                       <th scope="col">Counterparty</th>
                       <th scope="col">Amount</th>
+                      <th scope="col">Instrument</th>
                       <th scope="col">Recorded</th>
                       <th scope="col">Offset</th>
                     </tr>
                   </thead>
-                  <tbody aria-busy="true">
+                  <tbody id="history-body" aria-busy="true">
                     <tr class="table-placeholder">
+                      <td><span></span></td>
                       <td><span></span></td>
                       <td><span></span></td>
                       <td><span></span></td>
@@ -277,8 +286,10 @@
                       <td><span></span></td>
                       <td><span></span></td>
                       <td><span></span></td>
+                      <td><span></span></td>
                     </tr>
                     <tr class="table-placeholder">
+                      <td><span></span></td>
                       <td><span></span></td>
                       <td><span></span></td>
                       <td><span></span></td>
@@ -290,10 +301,23 @@
               </div>
 
               <div class="activity-footer">
-                <span>Only confidently reconstructed transfers appear here.</span>
-                <div>
-                  <button type="button" disabled aria-label="Previous history page">←</button>
-                  <button type="button" disabled aria-label="Next history page">→</button>
+                <span id="history-summary">
+                  Only confidently reconstructed transfers appear here.
+                </span>
+                <div aria-label="Transfer history pagination">
+                  <button
+                    type="button"
+                    id="history-previous"
+                    disabled
+                    aria-label="Previous history page"
+                  >←</button>
+                  <span id="history-page-status">Page —</span>
+                  <button
+                    type="button"
+                    id="history-next"
+                    disabled
+                    aria-label="Next history page"
+                  >→</button>
                 </div>
               </div>
             </section>

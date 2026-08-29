@@ -3,6 +3,7 @@
 import os
 import secrets
 from pathlib import Path
+from typing import Annotated
 
 from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -181,18 +182,22 @@ def _add_party_perspective(transfer, party):
 def history(
     party: str,
     limit: int = Query(default=100, ge=1, le=1000),
+    offset: Annotated[int, Query(ge=0)] = 0,
 ):
     """Return only confidently reconstructed semantic transfers."""
 
     full_party = get_party_or_404(party)
     transfers = [
         _add_party_perspective(transfer, full_party)
-        for transfer in database.get_transfers_for_party(full_party, limit)
+        for transfer in database.get_transfers_for_party(full_party, limit, offset)
     ]
     return {
         "party": full_party,
         "transfers": transfers,
         "count": len(transfers),
+        "limit": limit,
+        "offset": offset,
+        "total": database.count_transfers_for_party(full_party),
         "last_offset": database.get_saved_offset(),
         "active": bool(
             (database.get_party_tracking(full_party) or {}).get("active")
