@@ -127,12 +127,11 @@ python -m pip install -r requirements.txt
 ```
 
 DevNet credentials are expected in the existing ignored `.env`. Load them into
-the shell without printing them:
+the shell without printing them when using manual commands. On a fresh checkout,
+copy `.env.example` to `.env` and replace its placeholders:
 
 ```bash
-set -a
-source .env
-set +a
+cp .env.example .env
 ```
 
 Never commit `.env`, `scanner.db`, tokens, or `C8_CLIENT_SECRET`. Do not use
@@ -144,23 +143,20 @@ bearer token's `sub`; LocalNet keeps the toolkit's `ledger-api-user` default.
 
 ## Run the demo
 
-For the normal local demo, run one FastAPI process with its managed scanner
-worker. The worker discovers the cached catalog when needed, preserves the
-existing database and offset, reconciles selection changes, and keeps the live
-stream connected:
+For the normal local demo, use the checked one-command launcher. It loads the
+ignored `.env`, verifies credentials and SQLite without resetting state, then
+runs one FastAPI process with its managed scanner worker:
 
 ```bash
 source .venv/bin/activate
-set -a; source .env; set +a
-export SCANNER_RUN_WORKER=1
-export SCANNER_ADMIN_TOKEN='choose-a-long-random-demo-token'
-python -m uvicorn api:app
+python demo.py
 ```
 
 Open `http://127.0.0.1:8000/`. Do not add `--workers`, and do not run
 `scanner.py` or `updates.py` in another terminal while the managed worker is
-enabled. Plain `python -m uvicorn api:app` is preferred over reload mode for a
-stable demo and guarantees the worker uses the same virtual environment.
+enabled. Run `python demo.py --check-only` for preflight without starting the
+service. See [DEMO_RUNBOOK.md](DEMO_RUNBOOK.md) for the presentation sequence,
+restart proof, and non-destructive recovery commands.
 
 On a fresh database, the worker selects the original three demo parties only
 when all three are readable. If they are not, the catalog still becomes

@@ -5,6 +5,10 @@ import vm from "node:vm";
 
 
 const source = await readFile(new URL("../frontend/app.js", import.meta.url), "utf8");
+const stylesSource = await readFile(
+  new URL("../frontend/styles.css", import.meta.url),
+  "utf8",
+);
 
 
 class MockClassList {
@@ -633,4 +637,56 @@ test("inactive focused parties retain history without requesting a balance", asy
     harness.elements.get("#history-state").textContent.includes("indexing inactive"),
     true,
   );
+});
+
+
+test("party search has a keyboard shortcut and secrets have no durable browser storage", async () => {
+  const harness = createHarness(async (path) => {
+    let payload;
+    if (path === "/health") {
+      payload = {
+        status: "bootstrap_required",
+        last_offset: null,
+        catalog: { complete: true, readable_count: 0 },
+        active_party_count: 0,
+        desired_party_count: 0,
+        restart_required: false,
+      };
+    } else if (path === "/parties/selection") {
+      payload = {
+        desired_parties: [],
+        active_parties: [],
+        max_parties: 50,
+        selection_management_enabled: true,
+      };
+    } else {
+      payload = { items: [], total: 0, limit: 50, offset: 0 };
+    }
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => "application/json" },
+      json: async () => payload,
+    };
+  });
+
+  await settle();
+  let prevented = false;
+  harness.documentListeners.get("keydown")({
+    metaKey: true,
+    ctrlKey: false,
+    key: "k",
+    preventDefault: () => { prevented = true; },
+  });
+  assert.equal(prevented, true);
+  assert.equal(harness.elements.get("#party-search").focused, true);
+  assert.equal(/localStorage|sessionStorage|document\.cookie/.test(source), false);
+});
+
+
+test("responsive and reduced-motion safeguards remain in the stylesheet", () => {
+  assert.equal(stylesSource.includes("@media (max-width: 600px)"), true);
+  assert.equal(stylesSource.includes("@media (max-width: 820px)"), true);
+  assert.equal(stylesSource.includes("prefers-reduced-motion: reduce"), true);
+  assert.equal(stylesSource.includes(":focus-visible"), true);
 });

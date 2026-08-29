@@ -795,8 +795,8 @@ class ApiTests(TemporaryScannerDatabase):
 
         self.assertEqual(response.media_type, "text/html")
         self.assertIn('id="dashboard"', html)
-        self.assertIn('href="/assets/styles.css"', html)
-        self.assertIn('src="/assets/app.js"', html)
+        self.assertRegex(html, r'href="/assets/styles\.css(?:\?v=\d+)?"')
+        self.assertRegex(html, r'src="/assets/app\.js(?:\?v=\d+)?"')
         self.assertIn('id="admin-dialog"', html)
         self.assertIn("@media (max-width: 600px)", styles)
         self.assertIn("prefers-reduced-motion", styles)

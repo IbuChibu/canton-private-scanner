@@ -1071,6 +1071,7 @@ h1 span {
 
 .balance-panel,
 .activity-panel {
+  min-width: 0;
   padding: 26px;
 }
 
@@ -1592,7 +1593,7 @@ footer a {
   }
 
   .workspace {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .party-panel {
