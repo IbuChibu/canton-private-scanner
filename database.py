@@ -208,6 +208,28 @@ def create_tables():
             ) VALUES (1, 0, 0)
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scanner_runtime_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                status TEXT NOT NULL,
+                last_heartbeat TEXT,
+                connected_at TEXT,
+                last_error TEXT,
+                worker_pid INTEGER,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO scanner_runtime_state (
+                id, status, last_heartbeat, connected_at, last_error,
+                worker_pid, updated_at
+            ) VALUES (1, 'stopped', NULL, NULL, NULL, NULL, ?)
+            """,
+            (utc_now(),),
+        )
 
         # Existing databases predate configurable party selection. Seed both
         # desired and active state from their current Holdings without moving
@@ -256,6 +278,123 @@ def create_tables():
         raise
     finally:
         conn.close()
+
+
+RUNTIME_STATUSES = {
+    "starting",
+    "discovering",
+    "reconciling",
+    "connected",
+    "retrying",
+    "stopped",
+}
+
+
+def update_scanner_runtime(status, error=None, worker_pid=None):
+    """Persist a bounded worker status and liveness heartbeat."""
+
+    if status not in RUNTIME_STATUSES:
+        raise ValueError(f"Unknown scanner runtime status: {status}")
+    now = utc_now()
+    bounded_error = None
+    if error is not None:
+        bounded_error = " ".join(str(error).split())[:500]
+
+    conn = get_connection()
+    try:
+        previous = conn.execute(
+            """
+            SELECT status, connected_at, worker_pid
+            FROM scanner_runtime_state WHERE id = 1
+            """
+        ).fetchone()
+        previous_status, connected_at, previous_pid = previous or (
+            None,
+            None,
+            None,
+        )
+        if status == "connected" and previous_status != "connected":
+            connected_at = now
+        if worker_pid is None and status != "stopped":
+            worker_pid = previous_pid
+        if status == "stopped":
+            worker_pid = None
+        conn.execute(
+            """
+            INSERT INTO scanner_runtime_state (
+                id, status, last_heartbeat, connected_at, last_error,
+                worker_pid, updated_at
+            ) VALUES (1, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                status = excluded.status,
+                last_heartbeat = excluded.last_heartbeat,
+                connected_at = excluded.connected_at,
+                last_error = excluded.last_error,
+                worker_pid = excluded.worker_pid,
+                updated_at = excluded.updated_at
+            """,
+            (
+                status,
+                now,
+                connected_at,
+                bounded_error,
+                worker_pid,
+                now,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def touch_scanner_runtime():
+    """Record local worker liveness while the ledger stream is quiet."""
+
+    now = utc_now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            UPDATE scanner_runtime_state
+            SET last_heartbeat = ?, updated_at = ?
+            WHERE id = 1
+            """,
+            (now, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_scanner_runtime():
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT status, last_heartbeat, connected_at, last_error,
+                   worker_pid, updated_at
+            FROM scanner_runtime_state WHERE id = 1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return {
+            "status": "stopped",
+            "last_heartbeat": None,
+            "connected_at": None,
+            "last_error": None,
+            "worker_pid": None,
+            "updated_at": None,
+        }
+    return {
+        "status": row[0],
+        "last_heartbeat": row[1],
+        "connected_at": row[2],
+        "last_error": row[3],
+        "worker_pid": row[4],
+        "updated_at": row[5],
+    }
 
 
 def get_saved_offset():

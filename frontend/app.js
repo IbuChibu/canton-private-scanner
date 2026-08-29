@@ -231,7 +231,7 @@
 
   function deriveStatus(health) {
     const catalog = health.catalog ?? {};
-    const stream = health.stream ?? null;
+    const stream = health.stream?.enabled === false ? null : (health.stream ?? null);
 
     if (health.restart_required) {
       return {
@@ -320,9 +320,18 @@
       elements.catalogDetail.textContent = "Catalog refresh required";
     }
 
-    const updatedAt = state.lastSuccessfulAt ?? new Date();
-    elements.lastUpdated.dateTime = updatedAt.toISOString();
-    elements.lastUpdated.textContent = `Updated ${formatTime(updatedAt)}`;
+    const stream = health.stream?.enabled === false ? null : (health.stream ?? null);
+    if (stream?.last_heartbeat) {
+      const heartbeat = new Date(stream.last_heartbeat);
+      elements.lastUpdated.dateTime = stream.last_heartbeat;
+      elements.lastUpdated.textContent = Number.isNaN(heartbeat.getTime())
+        ? "Worker heartbeat available"
+        : `Heartbeat ${formatRelativeTime(stream.last_heartbeat)}`;
+    } else {
+      const updatedAt = state.lastSuccessfulAt ?? new Date();
+      elements.lastUpdated.dateTime = updatedAt.toISOString();
+      elements.lastUpdated.textContent = `Updated ${formatTime(updatedAt)}`;
+    }
     elements.scannerStatus.setAttribute("aria-busy", "false");
   }
 
@@ -1308,7 +1317,11 @@
       state.draftParties = new Set(response.desired_parties ?? []);
       setSelectionMessage(
         response.restart_required
-          ? "Selection saved. Scanner reconciliation is now required."
+          ? (
+            state.health?.stream?.enabled
+              ? "Selection saved. The local scanner is reconciling automatically."
+              : "Selection saved. Run scanner.py to reconcile the local index."
+          )
           : "Selection saved and active.",
         "success",
       );

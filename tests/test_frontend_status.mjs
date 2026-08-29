@@ -193,6 +193,11 @@ test("health polling renders the persisted scanner state", async () => {
     active_party_count: 3,
     desired_party_count: 3,
     restart_required: false,
+    stream: {
+      enabled: false,
+      status: "stopped",
+      last_heartbeat: null,
+    },
   };
   const harness = createHarness(async (path) => {
     let payload;
@@ -226,6 +231,54 @@ test("health polling renders the persisted scanner state", async () => {
   assert.equal(harness.elements.get("#catalog-summary").textContent, "5,784 readable");
   assert.equal(harness.elements.get("#scanner-status").attributes.get("aria-busy"), "false");
   assert.equal(harness.elements.get("#error-banner").hidden, true);
+});
+
+
+test("managed local worker status and heartbeat are rendered", async () => {
+  const heartbeat = new Date().toISOString();
+  const harness = createHarness(async (path) => {
+    let payload;
+    if (path === "/health") {
+      payload = {
+        status: "ok",
+        last_offset: 99,
+        catalog: { complete: true, readable_count: 1 },
+        active_party_count: 1,
+        desired_party_count: 1,
+        restart_required: false,
+        stream: {
+          enabled: true,
+          status: "connected",
+          last_heartbeat: heartbeat,
+          connected_at: heartbeat,
+        },
+      };
+    } else if (path === "/parties/selection") {
+      payload = {
+        desired_parties: [],
+        active_parties: [],
+        max_parties: 50,
+        selection_management_enabled: false,
+      };
+    } else {
+      payload = { items: [], total: 0, limit: 50, offset: 0 };
+    }
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => "application/json" },
+      json: async () => payload,
+    };
+  });
+
+  await settle();
+
+  assert.equal(harness.elements.get("#stream-status").textContent, "Live stream connected");
+  assert.equal(harness.elements.get("#stream-chip").textContent, "Live");
+  assert.equal(
+    harness.elements.get("#status-last-updated").textContent.startsWith("Heartbeat "),
+    true,
+  );
 });
 
 

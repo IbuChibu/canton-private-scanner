@@ -27,11 +27,14 @@ flowchart LR
     L["Private Canton Ledger API"]
     A["scanner.py<br/>ACS reconciliation at fixed offset"]
     U["updates.py<br/>party-scoped live stream"]
+    W["worker.py<br/>local automatic loop"]
     P["Conservative event parser"]
     D[("SQLite<br/>holdings + events + transfers + offset")]
     F["FastAPI"]
 
     R --> C --> S --> A
+    W --> A
+    W --> U
     L -->|"active contracts at offset N"| A
     A -->|"atomic snapshot + N"| D
     L -->|"beginExclusive N"| U
@@ -59,13 +62,15 @@ Starting the stream with a zero balance would be incorrect. Re-running
 `scanner.py` against an initialized database with no pending selection is a
 safe no-op; normal restarts go directly to `updates.py`.
 
-Selection changes are controlled restarts. The API updates only the desired
-set and revision. `updates.py` notices that pending revision after a stream
-message or checkpoint, closes the socket, and asks the operator to run
-`scanner.py`. At the existing saved offset, the scanner reads ACS only for
-additions, removes current Holdings for deselections, and atomically activates
-the new revision. Historical events and transfers are retained. Any ACS error,
-pruned offset, or revision race rolls the reconciliation back.
+Selection changes are controlled reconciliations. The API updates only the
+desired set and revision. The managed local worker notices a pending revision
+within five seconds even when the stream is quiet, closes the socket, runs the
+scanner at the existing saved offset, and reconnects automatically. The scanner
+reads ACS only for additions, removes current Holdings for deselections, and
+atomically activates the new revision. Historical events and transfers are
+retained. Any ACS error, pruned offset, or revision race rolls the reconciliation
+back. In manual mode, `updates.py` still stops cleanly and asks the operator to
+run `scanner.py`.
 
 ## Persistence and correctness
 
@@ -80,6 +85,8 @@ pruned offset, or revision race rolls the reconciliation back.
 - `party_selection`: the desired set.
 - `tracked_parties`: current/inactive indexing state and transition offsets.
 - `scanner_config`: desired and active selection revisions.
+- `scanner_runtime_state`: local worker status, heartbeat, connection time, and
+  the latest bounded retry error.
 
 For each live ledger transaction, Holding changes, raw events, semantic
 transfers, and the offset commit together. A failure rolls all of them back.
@@ -137,33 +144,37 @@ bearer token's `sub`; LocalNet keeps the toolkit's `ledger-api-user` default.
 
 ## Run the demo
 
-For the default demo, the first run discovers parties and selects the original
-three only if all three remain readable:
+For the normal local demo, run one FastAPI process with its managed scanner
+worker. The worker discovers the cached catalog when needed, preserves the
+existing database and offset, reconciles selection changes, and keeps the live
+stream connected:
 
 ```bash
 source .venv/bin/activate
 set -a; source .env; set +a
-python scanner.py
-python updates.py
+export SCANNER_RUN_WORKER=1
+export SCANNER_ADMIN_TOKEN='choose-a-long-random-demo-token'
+python -m uvicorn api:app
 ```
 
-For an explicit selection, populate the catalog without bootstrapping, start
-the API, inspect the cache, and save full party IDs:
+Open `http://127.0.0.1:8000/`. Do not add `--workers`, and do not run
+`scanner.py` or `updates.py` in another terminal while the managed worker is
+enabled. Plain `python -m uvicorn api:app` is preferred over reload mode for a
+stable demo and guarantees the worker uses the same virtual environment.
+
+On a fresh database, the worker selects the original three demo parties only
+when all three are readable. If they are not, the catalog still becomes
+available in the browser: unlock selection, choose at least one readable party,
+and apply it. The worker then bootstraps that desired set automatically.
+
+The local WebSocket endpoint defaults to the current DevNet URL. Override it
+when needed without editing code:
 
 ```bash
-python scanner.py --catalog-only
-export SCANNER_ADMIN_TOKEN='choose-a-long-random-demo-token'
-uvicorn api:app --reload
-curl 'http://127.0.0.1:8000/parties?q=00209&limit=50&offset=0'
-curl -X PUT http://127.0.0.1:8000/parties/selection \
-  -H "Authorization: Bearer $SCANNER_ADMIN_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"parties":["full::party-id"]}'
-python scanner.py
-python updates.py
+export C8_WS_URL='wss://your-ledger-host/api/ledger/v2/updates'
 ```
 
-Refresh the slow party catalog only when needed:
+To refresh the slow party catalog explicitly, stop the API first and run:
 
 ```bash
 python scanner.py --refresh-parties --catalog-only
@@ -174,11 +185,13 @@ the API to change it. Party browsing is public, but selection mutation is
 disabled unless `SCANNER_ADMIN_TOKEN` is configured. The browser keeps an
 entered admin token in memory for the current tab only.
 
-After the ACS has been bootstrapped, restart directly from the saved offset:
+The original two-terminal workflow remains available for debugging when
+`SCANNER_RUN_WORKER` is unset:
 
 ```bash
 source .venv/bin/activate
 set -a; source .env; set +a
+python scanner.py
 python updates.py
 ```
 
@@ -186,16 +199,16 @@ Terminal 2:
 
 ```bash
 source .venv/bin/activate
-uvicorn api:app --reload
+python -m uvicorn api:app
 ```
 
 Open `http://127.0.0.1:8000/` for the responsive scanner dashboard shell.
 The status rail polls the local health API, pauses in background tabs, keeps the
-last good state during transient failures, and supports the richer hosted-worker
-heartbeat planned for deployment. The party explorer drives a focused balance
-and transfer view: active parties show exact Decimal balances, inactive parties
-retain semantic history, and the first history page refreshes when the saved
-ledger offset advances.
+last good state during transient failures, and displays the local worker status
+and heartbeat. The party explorer drives a focused balance and transfer view:
+active parties show exact Decimal balances, inactive parties retain semantic
+history, and the first history page refreshes when the saved ledger offset
+advances.
 
 Then query a full party ID or an unambiguous prefix:
 
@@ -207,7 +220,7 @@ curl http://127.0.0.1:8000/history/00209eb9a1e8485ba9a7383aa6115ab2
 
 Endpoints:
 
-- `GET /health` — readiness and latest indexed offset.
+- `GET /health` — readiness, latest indexed offset, and local worker runtime.
 - `GET /parties?q=&limit=50&offset=0` — cached searchable authorized parties,
   selection state, and catalog metadata; it performs no live Canton calls.
 - `GET /parties/selection` — complete desired/active sets and selection limits.
@@ -228,7 +241,7 @@ they never need DevNet credentials or modify the real `scanner.db`.
 ```bash
 python -m unittest discover -s tests -v
 node --test tests/test_frontend_status.mjs
-python -m py_compile database.py scanner.py updates.py api.py c8lab.py
+python -m py_compile database.py scanner.py updates.py worker.py api.py c8lab.py
 ```
 
 Coverage includes authenticated-user resolution, rights parsing, paged
@@ -236,7 +249,8 @@ local-only discovery, atomic cache replacement, legacy database migration,
 selection validation and revisions, exact-offset reconciliation and rollback,
 active-only update filters, Holding create/archive, semantic history, replay,
 Decimal balances, history pagination and direction, inactive-party history,
-crash consistency, and restart request construction.
+quiet-stream revision detection, automatic reconciliation, worker restart and
+shutdown, crash consistency, and restart request construction.
 
 ## Known limitations
 

@@ -1,8 +1,11 @@
+import asyncio
 import base64
 import json
 import importlib
 import os
 import tempfile
+import threading
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -11,6 +14,7 @@ import c8lab
 import database
 import scanner
 import updates
+import worker
 
 
 ALICE = "00209eb9a1e8485ba9a7383aa6115ab2::1220alice"
@@ -470,6 +474,182 @@ class ScannerWorkflowTests(TemporaryScannerDatabase):
             self.assertTrue(database.get_selection_status()["restart_required"])
 
 
+class RuntimeWorkerTests(TemporaryScannerDatabase):
+    def activate(self, party=ALICE, offset=800):
+        database.replace_party_catalog(
+            [catalog_entry(ALICE), catalog_entry(BOB)],
+            "worker-user",
+            True,
+        )
+        selected = database.set_desired_parties([party])
+        database.replace_all_holdings_and_save_offset(
+            {party: []},
+            offset,
+            expected_revision=selected["desired_revision"],
+        )
+
+    def test_runtime_state_is_persisted_and_errors_are_bounded(self):
+        self.assertEqual(database.get_scanner_runtime()["status"], "stopped")
+        database.update_scanner_runtime("starting", worker_pid=1234)
+        database.update_scanner_runtime("retrying", error=("failure\n" * 200))
+        retrying = database.get_scanner_runtime()
+        self.assertEqual(retrying["status"], "retrying")
+        self.assertEqual(retrying["worker_pid"], 1234)
+        self.assertLessEqual(len(retrying["last_error"]), 500)
+        self.assertNotIn("\n", retrying["last_error"])
+
+        database.update_scanner_runtime("connected")
+        connected = database.get_scanner_runtime()
+        self.assertIsNotNone(connected["connected_at"])
+        self.assertIsNotNone(connected["last_heartbeat"])
+        database.touch_scanner_runtime()
+        self.assertIsNotNone(database.get_scanner_runtime()["last_heartbeat"])
+
+        database.update_scanner_runtime("stopped")
+        stopped = database.get_scanner_runtime()
+        self.assertEqual(stopped["status"], "stopped")
+        self.assertIsNone(stopped["worker_pid"])
+        with self.assertRaises(ValueError):
+            database.update_scanner_runtime("unknown")
+
+    def test_quiet_stream_detects_pending_selection_within_timeout(self):
+        self.activate()
+
+        class StreamTimeout(Exception):
+            pass
+
+        class FakeSocket:
+            def __init__(self):
+                self.timeout = None
+                self.closed = False
+                self.request = None
+
+            def settimeout(self, timeout):
+                self.timeout = timeout
+
+            def send(self, request):
+                self.request = json.loads(request)
+
+            def recv(self):
+                database.set_desired_parties([BOB])
+                raise StreamTimeout()
+
+            def close(self):
+                self.closed = True
+
+        socket = FakeSocket()
+        websocket_module = types.SimpleNamespace(
+            WebSocketTimeoutException=StreamTimeout,
+            create_connection=lambda *args, **kwargs: socket,
+        )
+        with mock.patch.object(updates, "websocket", websocket_module), mock.patch.object(
+            c8lab,
+            "token",
+            return_value="test-token",
+        ):
+            with self.assertRaises(updates.SelectionChangePending):
+                updates.run_stream(selection_check_interval=0.1)
+
+        self.assertEqual(socket.timeout, 0.1)
+        self.assertTrue(socket.closed)
+        self.assertNotIn(
+            "filtersForAnyParty",
+            socket.request["updateFormat"]["includeTransactions"]["eventFormat"],
+        )
+        self.assertEqual(database.get_scanner_runtime()["status"], "connected")
+        self.assertTrue(database.get_selection_status()["restart_required"])
+
+    def test_local_worker_reconciles_then_reconnects_automatically(self):
+        self.activate()
+        stop_event = threading.Event()
+        bootstrap_calls = []
+        stream_calls = []
+
+        def reconcile():
+            status = database.get_selection_status()
+            bootstrap_calls.append(status["desired_revision"])
+            if status["restart_required"]:
+                database.reconcile_tracked_parties(
+                    {BOB: []},
+                    [ALICE],
+                    database.get_saved_offset(),
+                    status["desired_revision"],
+                )
+
+        def stream(stop_requested=None):
+            stream_calls.append(database.get_active_parties())
+            if len(stream_calls) == 1:
+                database.set_desired_parties([BOB])
+                raise updates.SelectionChangePending("selection changed")
+            self.assertFalse(stop_requested())
+            stop_event.set()
+
+        with mock.patch.object(worker.scanner, "bootstrap_or_reconcile", reconcile), mock.patch.object(
+            worker.updates,
+            "run_stream",
+            stream,
+        ):
+            worker.run_worker(stop_event, initial_backoff=0, maximum_backoff=0)
+
+        self.assertEqual(stream_calls, [[ALICE], [BOB]])
+        self.assertGreaterEqual(len(bootstrap_calls), 2)
+        self.assertFalse(database.get_selection_status()["restart_required"])
+        self.assertEqual(database.get_scanner_runtime()["status"], "stopped")
+
+    def test_fastapi_supervisor_restarts_and_stops_child_cleanly(self):
+        api = importlib.import_module("api")
+
+        class FakeProcess:
+            def __init__(self, immediate=False):
+                self.immediate = immediate
+                self.returncode = None
+                self.done = asyncio.Event()
+                self.terminated = False
+                self.killed = False
+
+            async def wait(self):
+                if self.immediate:
+                    self.returncode = 7
+                    return 7
+                await self.done.wait()
+                self.returncode = 0
+                return 0
+
+            def terminate(self):
+                self.terminated = True
+                self.done.set()
+
+            def kill(self):
+                self.killed = True
+                self.done.set()
+
+        async def exercise():
+            stop_event = asyncio.Event()
+            processes = []
+
+            async def spawn():
+                process = FakeProcess(immediate=not processes)
+                processes.append(process)
+                if len(processes) == 2:
+                    stop_event.set()
+                return process
+
+            await api.supervise_local_worker(
+                stop_event,
+                spawn=spawn,
+                initial_backoff=0,
+                maximum_backoff=0,
+            )
+            return processes
+
+        processes = asyncio.run(exercise())
+        self.assertEqual(len(processes), 2)
+        self.assertEqual(processes[0].returncode, 7)
+        self.assertTrue(processes[1].terminated)
+        self.assertFalse(processes[1].killed)
+        self.assertEqual(database.get_scanner_runtime()["status"], "stopped")
+
+
 class UpdateParsingTests(TemporaryScannerDatabase):
     def load_fixture(self):
         return json.loads(FIXTURE.read_text())
@@ -668,6 +848,8 @@ class ApiTests(TemporaryScannerDatabase):
         self.assertEqual(health["active_party_count"], 1)
         self.assertEqual(health["desired_party_count"], 1)
         self.assertFalse(health["restart_required"])
+        self.assertEqual(health["stream"]["status"], "stopped")
+        self.assertFalse(health["stream"]["enabled"])
         self.assertEqual(
             api.balance(ALICE)["balances"],
             [{"instrument": "Amulet", "amount": "1.1"}],

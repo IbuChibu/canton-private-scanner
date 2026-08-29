@@ -1,6 +1,7 @@
 """Resumable private Canton Ledger API update scanner."""
 
 import json
+import os
 import time
 from decimal import Decimal, InvalidOperation
 
@@ -12,9 +13,12 @@ except ImportError:  # Pure parser/database tests do not need the WS dependency.
 import c8lab
 import database
 
-WS_URL = (
-    "wss://api.validator.dev.digik.cantor8.tech"
-    "/api/ledger/v2/updates"
+WS_URL = os.environ.get(
+    "C8_WS_URL",
+    (
+        "wss://api.validator.dev.digik.cantor8.tech"
+        "/api/ledger/v2/updates"
+    ),
 )
 
 # This is the transfer choice submitted by c8lab.transfer(). Keeping an exact
@@ -387,7 +391,7 @@ def build_filters():
     status = database.get_selection_status()
     if status["restart_required"]:
         raise SelectionChangePending(
-            "Party selection changed. Run scanner.py before restarting updates.py."
+            "Party selection changed and requires ACS reconciliation."
         )
     parties = status["active_parties"]
     if not parties:
@@ -414,9 +418,13 @@ def build_update_request(saved_offset, filters_by_party):
     }
 
 
-def run_stream():
+def run_stream(stop_requested=None, selection_check_interval=5):
+    """Run one stream connection until stop, disconnect, or reconciliation."""
+
     if websocket is None:
         raise RuntimeError("websocket-client is required; install requirements.txt")
+    stop_requested = stop_requested or (lambda: False)
+    selection_check_interval = min(5.0, max(0.1, float(selection_check_interval)))
     saved_offset = database.get_saved_offset()
     if saved_offset is None:
         raise RuntimeError("No saved scanner offset. Run scanner.py first.")
@@ -430,18 +438,38 @@ def run_stream():
         suppress_origin=True,
         timeout=20,
     )
-    ws.settimeout(None)
+    ws.settimeout(selection_check_interval)
     ws.send(json.dumps(request_body))
+    database.update_scanner_runtime("connected")
     print("connected to Canton private update stream")
     try:
         while True:
-            raw = ws.recv()
+            if stop_requested():
+                return
+            if database.get_selection_status()["restart_required"]:
+                raise SelectionChangePending(
+                    "Party selection changed and requires ACS reconciliation."
+                )
+            try:
+                raw = ws.recv()
+            except Exception as error:
+                timeout_error = getattr(
+                    websocket,
+                    "WebSocketTimeoutException",
+                    TimeoutError,
+                )
+                if isinstance(error, timeout_error):
+                    database.touch_scanner_runtime()
+                    continue
+                raise
+            if raw in (None, ""):
+                raise ConnectionError("Canton private update stream closed")
             if raw:
                 process_message(json.loads(raw))
+                database.touch_scanner_runtime()
                 if database.get_selection_status()["restart_required"]:
                     raise SelectionChangePending(
-                        "Party selection changed. Run scanner.py before "
-                        "restarting updates.py."
+                        "Party selection changed and requires ACS reconciliation."
                     )
     finally:
         ws.close()
@@ -449,24 +477,29 @@ def run_stream():
 
 def main():
     database.create_tables()
-    while True:
-        try:
-            run_stream()
-        except KeyboardInterrupt:
-            print("\nscanner stopped")
-            break
-        except SelectionChangePending as error:
-            print("\nupdates stopped cleanly:")
-            print(str(error))
-            break
-        except Exception as error:
-            print("\nstream disconnected:")
-            print(str(error)[:1000])
-            # c8lab caches bearer tokens; force a refresh before reconnecting.
-            if hasattr(c8lab, "_tok"):
-                c8lab._tok.clear()
-            print("retrying...")
-            time.sleep(2)
+    database.update_scanner_runtime("starting", worker_pid=os.getpid())
+    try:
+        while True:
+            try:
+                run_stream()
+            except KeyboardInterrupt:
+                print("\nscanner stopped")
+                break
+            except SelectionChangePending as error:
+                print("\nupdates stopped cleanly:")
+                print(str(error))
+                break
+            except Exception as error:
+                database.update_scanner_runtime("retrying", error=error)
+                print("\nstream disconnected:")
+                print(str(error)[:1000])
+                # c8lab caches bearer tokens; force a refresh before reconnecting.
+                if hasattr(c8lab, "_tok"):
+                    c8lab._tok.clear()
+                print("retrying...")
+                time.sleep(2)
+    finally:
+        database.update_scanner_runtime("stopped")
 
 
 if __name__ == "__main__":

@@ -1,9 +1,9 @@
-# Canton Private Scanner — Frontend and Deployment Plan
+# Canton Private Scanner — Local Demo Plan
 
 ## Goal
 
-Turn the working private-ledger scanner into a polished, deployable web
-application while preserving the existing correctness guarantees:
+Turn the working private-ledger scanner into a polished local web application
+while preserving the existing correctness guarantees:
 
 - balances start from an exact-offset Active Contract Set;
 - live updates resume from the saved offset;
@@ -11,10 +11,10 @@ application while preserving the existing correctness guarantees:
 - SQLite state survives service restarts;
 - the browser never receives Canton credentials or secrets.
 
-The frontend will use plain HTML, CSS, and JavaScript. FastAPI will serve the
-frontend and API from one origin, and the deployed Render service will run one
-API process plus one supervised scanner worker against one persistent SQLite
-database.
+The frontend uses plain HTML, CSS, and JavaScript. FastAPI serves the frontend
+and API from one local origin and can supervise one scanner worker against the
+existing persistent SQLite database. Cloud deployment is intentionally out of
+scope for this demo.
 
 ## Product Experience
 
@@ -43,16 +43,16 @@ and reduced-motion support. All ledger-provided strings must be inserted with
   `/balance/*`, `/history/*`, `/debug/*`, and `/docs` as API routes.
 - Use same-origin browser requests, so production CORS configuration is not
   required.
-- Keep the current manual `scanner.py` and `updates.py` commands for local
-  debugging. Add an opt-in hosted worker enabled by `SCANNER_RUN_WORKER=1`.
+- Keep the current manual `scanner.py` and `updates.py` commands for debugging.
+  Add an opt-in local worker enabled by `SCANNER_RUN_WORKER=1`.
 - Run exactly one Uvicorn worker and one scanner worker. Multiple service
   instances are forbidden while SQLite is the database.
-- Store the deployed database at `SCANNER_DB=/var/data/scanner.db` on a Render
-  persistent disk. An ephemeral filesystem is not acceptable for this track.
+- Keep `SCANNER_DB` on the local filesystem and preserve it between demo runs.
 - Make the Ledger WebSocket URL configurable with `C8_WS_URL`, retaining the
   current DevNet URL as the default.
-- Public read endpoints remain accessible for the demo. Protect party-selection
-  mutation with `SCANNER_ADMIN_TOKEN`; if it is unset, mutation is disabled.
+- Public read endpoints remain accessible on the local demo service. Protect
+  party-selection mutation with `SCANNER_ADMIN_TOKEN`; if it is unset,
+  mutation is disabled.
   The frontend may accept the token in an admin-unlock dialog and retain it in
   memory for the current tab only. It must never be embedded in static files or
   written to local storage.
@@ -65,7 +65,7 @@ Preserve every existing response field and add only backward-compatible data:
   counts, revisions, and `restart_required`. This lets the browser edit a
   selection across multiple catalog pages without losing off-page choices.
 - Keep `PUT /parties/selection`, but require
-  `Authorization: Bearer <SCANNER_ADMIN_TOKEN>` when hosted. Continue validating
+  `Authorization: Bearer <SCANNER_ADMIN_TOKEN>`. Continue validating
   full readable catalog IDs, deduplication, non-empty input, and the configured
   maximum.
 - Extend `GET /health` with a `stream` object containing `status`,
@@ -152,7 +152,9 @@ row badges.
 self transfers render correctly; inactive historical parties retain history
 but do not present a current balance.
 
-### Milestone 5 — Hosted scanner worker and reconciliation loop
+### Milestone 5 — Local scanner worker and reconciliation loop
+
+**Status: complete.**
 
 - Add a worker loop that runs scanner bootstrap/reconciliation and then the live
   updater. When a desired revision becomes pending, it must close the stream,
@@ -169,23 +171,19 @@ but do not present a current balance.
 the API stays responsive during slow catalog discovery; stopping the web
 service also stops the worker; replay remains idempotent.
 
-### Milestone 6 — Render deployment
+### Milestone 6 — Local demo launch and operator setup
 
-- Add Render infrastructure configuration for one Python web service, one
-  Uvicorn worker, and a persistent disk mounted at `/var/data`.
-- Configure `SCANNER_DB`, `SCANNER_RUN_WORKER`, `C8_BASE`, `C8_WS_URL`, `C8_IDP`,
-  `C8_CLIENT_ID`, `C8_CLIENT_SECRET`, `SCANNER_ADMIN_TOKEN`, and optional
-  `C8_USER` as environment variables. Secrets must be entered in Render, never
-  committed.
-- Bind Uvicorn to `0.0.0.0:$PORT`; expose `/health` for service checks.
-- Bootstrap a fresh Render database rather than committing or uploading the
-  local SQLite file. Verify that a normal deploy/restart retains its disk,
-  Holdings, active selection, and offset.
-- Document that horizontal scaling is disabled while using SQLite and that a
-  Render plan supporting persistent disks is required.
+- Add one documented startup flow for the FastAPI dashboard and managed worker.
+- Provide a safe local environment template covering `SCANNER_DB`,
+  `SCANNER_RUN_WORKER`, `C8_BASE`, `C8_WS_URL`, `C8_IDP`, `C8_CLIENT_ID`,
+  `C8_CLIENT_SECRET`, `SCANNER_ADMIN_TOKEN`, and optional `C8_USER`.
+- Add startup checks that clearly report missing credentials, an unavailable
+  participant, or an unwritable database without deleting scanner state.
+- Document manual recovery commands and the rule that only one API/worker pair
+  may use the SQLite database during the demo.
 
-**Acceptance:** the public URL loads the dashboard; the scanner reaches
-`connected`; balances survive a redeploy; the next connection resumes from the
+**Acceptance:** one local startup flow loads the dashboard, reaches
+`connected`, preserves balances across a stop/start, and resumes from the
 persisted offset.
 
 ### Milestone 7 — Submission validation and polish
@@ -204,15 +202,15 @@ persisted offset.
   clearly label fixture-only transfer coverage.
 
 **Acceptance:** all automated checks pass, no browser console errors remain,
-the deployed restart demonstration succeeds, and no credentials appear in the
+the local restart demonstration succeeds, and no credentials appear in the
 repository, page source, logs, or API responses.
 
 ## Delivery Order
 
 Implement milestones in order. Milestones 1–4 produce the complete local
 frontend. Milestone 5 makes selection changes operable without shell access.
-Milestone 6 creates the durable hosted service. Milestone 7 is the submission
-gate; do not call the project production-ready before the live restart and
+Milestone 6 creates the repeatable local demo startup. Milestone 7 is the
+submission gate; do not call the project demo-ready before the live restart and
 persistence checks pass.
 
 ## Out of Scope for This Version
@@ -222,5 +220,5 @@ persistence checks pass.
 - Transaction submission, wallet functions, or token transfers from the UI.
 - Multi-user accounts, durable browser sessions, or role management beyond the
   single admin token.
-- Multiple Render instances or a shared-database deployment. Moving beyond one
-  instance requires replacing SQLite with a network database first.
+- Cloud hosting, public deployment, or multiple service instances. Moving
+  beyond one local instance requires a separate security and database design.
