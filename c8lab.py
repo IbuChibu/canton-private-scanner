@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Canton hackathon lab. Stdlib only, no pip install.
 
-LocalNet (default):
+LocalNet (d#efault):
     python3 c8lab.py check
 
 DevNet:
