@@ -6,6 +6,8 @@ user-selected set of authorized parties by reading the **private Canton Ledger
 API**. The original three demo parties remain the fresh-database defaults. The
 public Scan API is not used as the source of scanner history.
 
+https://drive.google.com/file/d/1mgWGK6Ue6p2pTCZST1nIvmUUK-l6AsNb/view?usp=drive_link
+
 ## Why a private scanner?
 
 Canton data is disclosed on a need-to-know basis. A participant sees ledger
